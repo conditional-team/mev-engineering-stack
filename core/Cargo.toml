@@ -1,0 +1,92 @@
+[package]
+name = "mev-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["MEV Protocol Team"]
+description = "High-performance MEV extraction engine"
+license = "Proprietary"
+build = "build.rs"
+
+[lib]
+name = "mev_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mev-engine"
+path = "src/main.rs"
+
+[[bin]]
+name = "scanner"
+path = "src/bin/scanner.rs"
+
+[[bin]]
+name = "benchmark"
+path = "src/bin/benchmark.rs"
+
+[build-dependencies]
+cc = "1.0"
+
+[dependencies]
+# Environment
+dotenv = "0.15"
+# Async runtime
+tokio = { version = "1.35", features = ["full", "rt-multi-thread", "macros", "sync", "time"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+# Ethereum
+alloy = { version = "0.1", features = ["full"] }
+ethers = { version = "2.0", features = ["abigen", "ws", "rustls"] }
+revm = { version = "8.0", features = ["std", "serde"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
+
+# Cryptography
+sha3 = "0.10"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Utilities
+hex = "0.4"
+bytes = "1.5"
+dashmap = "5.5"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+num_cpus = "1.16"
+
+# Metrics
+metrics = "0.22"
+metrics-exporter-prometheus = "0.13"
+
+# FFI for C bindings
+libc = "0.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio-test = "0.4"
+proptest = "1.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+inherits = "release"
+debug = true

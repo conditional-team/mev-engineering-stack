@@ -1,0 +1,119 @@
+{
+  "dexes": {
+    "uniswap_v2": {
+      "name": "Uniswap V2",
+      "type": "v2",
+      "fee_bps": 30,
+      "chains": {
+        "1": {
+          "router": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+          "factory": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+          "init_code_hash": "0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f"
+        }
+      }
+    },
+    "uniswap_v3": {
+      "name": "Uniswap V3",
+      "type": "v3",
+      "chains": {
+        "1": {
+          "router": "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+          "router2": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+          "factory": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+          "quoter": "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6",
+          "quoter2": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
+        },
+        "42161": {
+          "router": "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+          "router2": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+          "factory": "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+        },
+        "8453": {
+          "router": "0x2626664c2603336E57B271c5C0b26F421741e481",
+          "factory": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+        }
+      }
+    },
+    "sushiswap": {
+      "name": "SushiSwap",
+      "type": "v2",
+      "fee_bps": 30,
+      "chains": {
+        "1": {
+          "router": "0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F",
+          "factory": "0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac"
+        },
+        "42161": {
+          "router": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",
+          "factory": "0xc35DADB65012eC5796536bD9864eD8773aBc74C4"
+        }
+      }
+    },
+    "camelot": {
+      "name": "Camelot",
+      "type": "v2",
+      "fee_bps": 30,
+      "chains": {
+        "42161": {
+          "router": "0xc873fEcbd354f5A56E00E710B90EF4201db2448d",
+          "factory": "0x6EcCab422D763aC031210895C81787E87B43A652"
+        }
+      }
+    },
+    "aerodrome": {
+      "name": "Aerodrome",
+      "type": "solidly",
+      "chains": {
+        "8453": {
+          "router": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
+          "factory": "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
+        }
+      }
+    },
+    "velodrome": {
+      "name": "Velodrome",
+      "type": "solidly",
+      "chains": {
+        "10": {
+          "router": "0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858",
+          "factory": "0xF1046053aa5682b4F9a81b5481394DA16BE5FF5a"
+        }
+      }
+    },
+    "curve": {
+      "name": "Curve",
+      "type": "curve",
+      "chains": {
+        "1": {
+          "registry": "0x90E00ACe148ca3b23Ac1bC8C240C2a7Dd9c2d7f5",
+          "address_provider": "0x0000000022D53366457F9d5E68Ec105046FC4383"
+        }
+      }
+    },
+    "balancer": {
+      "name": "Balancer",
+      "type": "balancer",
+      "chains": {
+        "1": {
+          "vault": "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
+        },
+        "42161": {
+          "vault": "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
+        },
+        "8453": {
+          "vault": "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
+        }
+      }
+    },
+    "pancakeswap_v3": {
+      "name": "PancakeSwap V3",
+      "type": "v3",
+      "chains": {
+        "56": {
+          "router": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",
+          "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865"
+        }
+      }
+    }
+  }
+}

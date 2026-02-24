@@ -1,0 +1,59 @@
+{
+  "chains": {
+    "1": {
+      "name": "Ethereum",
+      "chain_id": 1,
+      "rpc_url": "https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY",
+      "ws_url": "wss://eth-mainnet.g.alchemy.com/v2/YOUR_KEY",
+      "flashbots_relay": "https://relay.flashbots.net",
+      "bloxroute_relay": "https://mev.api.blxrbdn.com",
+      "balancer_vault": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+      "contract_address": null
+    },
+    "42161": {
+      "name": "Arbitrum",
+      "chain_id": 42161,
+      "rpc_url": "https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY",
+      "ws_url": "wss://arb-mainnet.g.alchemy.com/v2/YOUR_KEY",
+      "flashbots_relay": null,
+      "balancer_vault": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+      "contract_address": null
+    },
+    "8453": {
+      "name": "Base",
+      "chain_id": 8453,
+      "rpc_url": "https://base-mainnet.g.alchemy.com/v2/YOUR_KEY",
+      "ws_url": "wss://base-mainnet.g.alchemy.com/v2/YOUR_KEY",
+      "flashbots_relay": "https://relay.flashbots.net",
+      "balancer_vault": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+      "contract_address": null
+    },
+    "10": {
+      "name": "Optimism",
+      "chain_id": 10,
+      "rpc_url": "https://opt-mainnet.g.alchemy.com/v2/YOUR_KEY",
+      "ws_url": "wss://opt-mainnet.g.alchemy.com/v2/YOUR_KEY",
+      "flashbots_relay": null,
+      "balancer_vault": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+      "contract_address": null
+    },
+    "137": {
+      "name": "Polygon",
+      "chain_id": 137,
+      "rpc_url": "https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY",
+      "ws_url": "wss://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY",
+      "flashbots_relay": null,
+      "balancer_vault": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+      "contract_address": null
+    },
+    "56": {
+      "name": "BSC",
+      "chain_id": 56,
+      "rpc_url": "https://bsc-dataseed.binance.org",
+      "ws_url": "wss://bsc-ws-node.nariox.org",
+      "flashbots_relay": null,
+      "balancer_vault": null,
+      "contract_address": null
+    }
+  }
+}
