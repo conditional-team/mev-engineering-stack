@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose an improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What limitation are you solving?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe implementation approach and tradeoffs
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Performance, complexity, and operational impact

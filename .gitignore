@@ -1,0 +1,71 @@
+# Dependencies
+node_modules/
+target/
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Rust
+core/target/
+core/Cargo.lock
+
+# Go
+network/vendor/
+
+# C Build
+fast/lib/
+fast/obj/
+fast/*.a
+fast/*.so
+fast/*.o
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+
+# Environment
+.env
+.env.local
+.env.*.local
+config/.env
+config/*.local
+*.env.backup
+*.env.bak
+
+# Secrets and reports
+secrets/
+*.secrets
+*.pem
+*.p12
+*.keystore
+*.key
+
+# Tooling artifacts
+.DS_Store
+*.tmp
+*.temp
+coverage/
+dist/
+
+# Logs
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keys - NEVER COMMIT
+*.pem
+*.key
+keystore/

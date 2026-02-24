@@ -1,0 +1,37 @@
+# MEV Protocol - Go Network Image
+FROM golang:1.21-alpine as builder
+
+WORKDIR /build
+
+# Install dependencies
+RUN apk add --no-cache gcc musl-dev
+
+# Copy source
+COPY network/ ./
+
+# Download dependencies
+RUN go mod download
+
+# Build
+RUN CGO_ENABLED=0 go build -ldflags="-w -s" -o mev-node ./cmd/mev-node
+
+# Runtime image
+FROM alpine:3.19
+
+WORKDIR /app
+
+# Install CA certificates
+RUN apk add --no-cache ca-certificates
+
+# Copy binary
+COPY --from=builder /build/mev-node /app/
+
+# Create non-root user
+RUN adduser -D -u 1000 mev
+USER mev
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD pgrep mev-node || exit 1
+
+ENTRYPOINT ["/app/mev-node"]

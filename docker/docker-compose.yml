@@ -1,0 +1,76 @@
+version: "3.9"
+
+services:
+  mev-engine:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: mev-engine
+    restart: unless-stopped
+    environment:
+      - MEV_CONFIG=/app/config/config.json
+      - LOG_LEVEL=info
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+    networks:
+      - mev-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+  mev-node:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.network
+    container_name: mev-node
+    restart: unless-stopped
+    environment:
+      - CONFIG_PATH=/app/config/chains.json
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+    networks:
+      - mev-network
+    depends_on:
+      - mev-engine
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: mev-prometheus
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - mev-network
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: mev-grafana
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=mev_admin
+    ports:
+      - "3000:3000"
+    networks:
+      - mev-network
+    depends_on:
+      - prometheus
+
+networks:
+  mev-network:
+    driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:
