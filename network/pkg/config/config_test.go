@@ -31,8 +31,8 @@ func TestLoad_Defaults(t *testing.T) {
 		t.Errorf("expected 4 workers, got %d", cfg.Pipeline.Workers)
 	}
 
-	if cfg.Block.MaxReorgDepth != 64 {
-		t.Errorf("expected max reorg 64, got %d", cfg.Block.MaxReorgDepth)
+	if cfg.Block.MaxReorgDepth != 128 {
+		t.Errorf("expected max reorg 128, got %d", cfg.Block.MaxReorgDepth)
 	}
 
 	if cfg.Gas.ElasticityMultiplier != 2 {

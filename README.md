@@ -1,103 +1,251 @@
-# ⚡ MEV Protocol
+# MEV Protocol
 
-**High-Performance Multi-Language MEV Engineering Stack**  
-Low-latency detection, simulation, and execution research for EVM ecosystems.
+**High-Performance Multi-Language MEV Engineering Stack**
 
-![Rust](https://img.shields.io/badge/Rust-Core-orange?style=for-the-badge&logo=rust)
-![Go](https://img.shields.io/badge/Go-Network-00ADD8?style=for-the-badge&logo=go)
-![Solidity](https://img.shields.io/badge/Solidity-Contracts-363636?style=for-the-badge&logo=solidity)
-![C](https://img.shields.io/badge/C-Hot%20Path-A8B9CC?style=for-the-badge&logo=c)
-![CI](https://img.shields.io/badge/CI-Enabled-success?style=for-the-badge)
+Low-latency mempool monitoring, transaction classification, bundle construction, and relay submission for **Arbitrum**. Four-language architecture optimized for each layer of the MEV pipeline.
+
+![Rust](https://img.shields.io/badge/Rust-Core_Engine-orange?style=flat-square&logo=rust)
+![Go](https://img.shields.io/badge/Go-Network_Layer-00ADD8?style=flat-square&logo=go)
+![C](https://img.shields.io/badge/C-Hot_Path-A8B9CC?style=flat-square&logo=c)
+![Solidity](https://img.shields.io/badge/Solidity-Contracts-363636?style=flat-square&logo=solidity)
+![CI](https://img.shields.io/github/actions/workflow/status/ivanpiardi/mev-engineering-stack/ci.yml?style=flat-square&label=CI)
 
 ---
 
-## 🚀 Executive Overview
+## Architecture
 
-MEV Protocol is a portfolio-grade systems project built to showcase production-oriented engineering across runtime boundaries.
-
-It combines:
-
-- **Solidity/Yul** for on-chain execution paths
-- **Rust** for orchestration, detection, and simulation
-- **Go** for mempool networking and relay interaction
-- **C** for low-level hot-path components
-
-The repository is structured for technical review, reproducible builds, and iterative extension.
-
-## 🧱 Architecture
-
-- `contracts/` — smart contracts and Foundry tests
-- `core/` — Rust engine (`mev-engine`, `scanner`, `benchmark`)
-- `network/` — Go node for mempool and relay components
-- `fast/` — C static/shared libraries for performance-critical code
-- `config/` — chain, DEX, and environment configuration
-- `scripts/` — build and deployment scripts
-- `docker/` — container runtime assets
-
-## 📌 Engineering Status
-
-- ✅ Multi-stack build and test flow available
-- ✅ CI pipeline configured for Rust, Go, and Solidity
-- ✅ Contract-layer callback spoofing hardening (Balancer + Uniswap V3)
-- ✅ Deterministic route validation with trusted factory/router controls
-- ⚠️ Some modules still contain placeholder/TODO logic (notably parts of detector/simulator)
-
-Positioning is intentionally transparent: strong technical foundation with active feature completion.
-
-## 🛠️ Quality & Process
-
-- CI workflow: `.github/workflows/ci.yml`
-- Local gates: `make build`, `make test`, `make lint`, `make ci-local`
-- Security hygiene: sanitized templates (`config/.env.example`) + strict ignore rules
-
-## 🔐 Contract Hardening Highlights
-
-- Flash loan callback is bound to active execution context (`executor`, `token`, `amount`, `swap hash`).
-- Uniswap V3 callbacks are accepted only from the active pool for the active swap.
-- Swap route decoding rejects malformed payloads and unknown swap types.
-- V2/V3 execution paths validate trusted routers/factories before swap execution.
-- ERC20 transfer/transferFrom/approve wrappers enforce strict return-data checks.
-
-## ✅ Post-Deploy Security Checklist
-
-Before enabling execution in production:
-
-1. Set whitelisted executors.
-2. Set trusted V2 routers (FlashArbitrage).
-3. Set trusted V3 factory (FlashArbitrage).
-4. Set trusted V2/V3 factories (MultiDexRouter).
-5. Keep contract paused until off-chain simulation and dry-run checks are green.
-
-## ⚡ Quick Start
-
-- Setup guide: [QUICKSTART.md](QUICKSTART.md)
-- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Security policy: [SECURITY.md](SECURITY.md)
-
-### Windows (PowerShell)
-
-```powershell
-.\scripts\build.ps1
+```
+                    ┌──────────────────────────────────────────────┐
+                    │              MEV Protocol Stack               │
+                    └──────────────────────────────────────────────┘
+                                        │
+          ┌─────────────────────────────┼─────────────────────────────┐
+          │                             │                             │
+    ┌─────┴─────┐               ┌──────┴──────┐              ┌──────┴──────┐
+    │  network/  │               │    core/     │              │ contracts/  │
+    │    (Go)    │               │   (Rust)     │              │ (Solidity)  │
+    │            │               │              │              │             │
+    │ Mempool    │──tx stream──▶│ Detection    │──bundles───▶│ FlashArb    │
+    │ Pipeline   │               │ Simulation   │              │ MultiDex    │
+    │ Relay      │◀─submission──│ Optimization │              │ Callbacks   │
+    │ Metrics    │               │ Benchmark    │              │             │
+    └────────────┘               └──────┬───────┘              └─────────────┘
+                                        │
+                                  ┌─────┴─────┐
+                                  │   fast/    │
+                                  │    (C)     │
+                                  │            │
+                                  │ Keccak     │
+                                  │ RLP Encode │
+                                  │ SIMD Utils │
+                                  │ Lock-free Q│
+                                  │ Mem Pool   │
+                                  └────────────┘
 ```
 
-### Linux/macOS
+### Layer Breakdown
+
+| Layer | Language | Purpose | Key Files |
+|-------|----------|---------|-----------|
+| **network/** | Go 1.21 | Mempool subscription, tx classification, relay submission, Prometheus metrics | `cmd/mev-node/main.go` |
+| **core/** | Rust | MEV detection engine, EVM simulation (revm), Arbitrum scanner | `src/main.rs`, `src/detector/`, `src/simulator/` |
+| **contracts/** | Solidity | Flash loan arbitrage, multi-DEX routing, callback hardening | `src/FlashArbitrage.sol`, `src/MultiDexRouter.sol` |
+| **fast/** | C | SIMD keccak, RLP encoding, lock-free queue, memory pool | `src/keccak.c`, `src/lockfree_queue.c` |
+
+---
+
+## Go Network Node — `network/`
+
+Production-grade mempool monitoring and relay infrastructure.
+
+### Components
+
+| Package | Description |
+|---------|-------------|
+| `internal/mempool` | WebSocket pending tx subscription via `gethclient`, configurable selector filtering |
+| `internal/pipeline` | Multi-worker tx classifier — UniswapV2 (6 selectors), V3 (4), ERC20, Aave liquidations, flash loans |
+| `internal/block` | New head subscription with reorg detection (configurable depth), polling fallback |
+| `internal/gas` | EIP-1559 base fee oracle — real formula implementation with multi-block prediction |
+| `internal/relay` | Flashbots bundle submission + multi-relay manager (Race / Primary / All strategies) |
+| `internal/rpc` | Connection pool with health checking, latency-based routing, automatic reconnection |
+| `internal/metrics` | Prometheus instrumentation — RPC latency, mempool throughput, pipeline classification, relay stats |
+| `pkg/config` | Environment-based configuration with typed parsing and sensible defaults |
+
+### Build & Test
 
 ```bash
-chmod +x scripts/build.sh
-./scripts/build.sh
+cd network
+go build ./...
+go test ./... -v          # 23 tests
+go test ./... -bench .    # benchmarks
 ```
 
-## 🎯 Technical Highlights
+### Pipeline Flow
 
-- Low-latency architecture and performance tradeoffs
-- Polyglot systems integration (Rust/Go/C/Solidity)
-- Smart-contract and off-chain coordination patterns
-- Mature engineering workflow (CI, templates, quality gates)
+```
+Mempool (gethclient) → Buffer (10k) → Workers (4x) → Classify → Decode → Output
+                                                         │
+                                          ┌──────────────┼──────────────┐
+                                          │              │              │
+                                       SwapV2         SwapV3      Liquidation
+                                    (6 selectors)  (4 selectors)   (Aave V2/V3)
+```
 
-## ⚖️ Responsible Use
+---
 
-This repository is for engineering research and education. Users are responsible for legal, compliance, and operational risk management in their jurisdiction.
+## Rust Core Engine — `core/`
 
-## 📄 License
+High-performance MEV detection and simulation.
 
-Proprietary (as currently configured in project metadata).
+- **revm** for local EVM simulation of arbitrage paths
+- **Tokio** async runtime with multi-threaded executor
+- **crossbeam** lock-free channels for detector ↔ simulator pipeline
+- **alloy + ethers** for Ethereum type primitives and ABI encoding
+- **Prometheus metrics** via `metrics-exporter-prometheus`
+- **C FFI** integration for hot-path keccak and RLP operations (`fast/`)
+
+### Build
+
+```bash
+cd core
+cargo build --release     # opt-level=3, lto=fat, codegen-units=1
+cargo bench               # criterion benchmarks
+```
+
+---
+
+## Smart Contracts — `contracts/`
+
+Foundry-based Solidity contracts with comprehensive security hardening.
+
+### Contracts
+
+- **FlashArbitrage.sol** — Balancer flash loan arbitrage with V2/V3 execution paths
+- **MultiDexRouter.sol** — Multi-DEX routing with trusted factory/router validation
+
+### Security Hardening
+
+- Flash loan callback bound to active execution context (executor, token, amount, swap hash)
+- UniswapV3 callbacks accepted only from verified pool for active swap
+- Malformed route decoding rejection
+- Trusted router/factory whitelisting
+- Strict ERC20 return-data checks on transfer/transferFrom/approve
+
+### Test
+
+```bash
+cd contracts
+forge test -vvv
+```
+
+---
+
+## C Hot Path — `fast/`
+
+Low-level performance-critical components linked into the Rust core via FFI.
+
+| File | Purpose |
+|------|---------|
+| `keccak.c` | Keccak-256 hashing |
+| `rlp.c` | RLP encoding for Ethereum transactions |
+| `simd_utils.c` | SIMD-accelerated byte operations |
+| `lockfree_queue.c` | Lock-free MPSC queue for cross-thread data flow |
+| `memory_pool.c` | Arena allocator for zero-alloc transaction processing |
+| `parser.c` | Binary data parsing utilities |
+
+```bash
+cd fast
+make            # build static library
+make test       # run test_all
+```
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone
+git clone https://github.com/ivanpiardi/mev-engineering-stack.git
+cd mev-engineering-stack
+
+# 2. Configure
+cp .env.example .env
+# Edit .env with your RPC endpoints and keys
+
+# 3. Build all layers
+cd network && go build ./... && cd ..
+cd core && cargo build --release && cd ..
+cd contracts && forge build && cd ..
+cd fast && make && cd ..
+
+# 4. Run Go network node
+cd network && go run ./cmd/mev-node/
+
+# 5. Run tests
+cd network && go test ./...
+cd core && cargo test
+cd contracts && forge test
+```
+
+### Environment
+
+Copy `.env.example` to `.env` at the project root. All components read from this file.
+
+Key variables:
+- `MEV_RPC_ENDPOINTS` — Comma-separated WebSocket RPC URLs (Go node)
+- `ARBITRUM_RPC_URL` / `ARBITRUM_WS_URL` — Arbitrum endpoints (Rust core)
+- `FLASHBOTS_SIGNING_KEY` — Bundle signing key for relay submission
+- `MEV_PIPELINE_WORKERS` — Number of parallel classification workers (default: 4)
+- `MEV_METRICS_ADDR` — Prometheus metrics endpoint (default: `:9090`)
+
+See [.env.example](.env.example) for the full list.
+
+---
+
+## CI / Quality Gates
+
+- **GitHub Actions**: `.github/workflows/ci.yml` — Rust, Go, Solidity build + test
+- **Local**: `make build`, `make test`, `make lint`, `make ci-local`
+- **Security**: `.env` gitignored, sanitized `.env.example`, callback spoofing tests
+
+## Post-Deploy Checklist
+
+1. Set whitelisted executors on FlashArbitrage
+2. Set trusted V2 routers and V3 factory
+3. Set trusted factories on MultiDexRouter
+4. Keep contracts paused until dry-run simulation passes
+5. Verify Prometheus metrics are reporting correctly
+
+---
+
+## Project Structure
+
+```
+mev-engineering-stack/
+├── .env.example            # Environment template
+├── .github/workflows/      # CI pipeline
+├── contracts/              # Solidity — FlashArbitrage, MultiDexRouter, Foundry tests
+├── core/                   # Rust — MEV engine, scanner, revm simulation
+│   └── src/
+│       ├── detector/       # Opportunity detection
+│       ├── simulator/      # Local EVM simulation
+│       ├── mempool/        # Mempool data handling
+│       ├── builder/        # Bundle construction
+│       ├── arbitrum/       # Arbitrum-specific logic
+│       └── ffi/            # C FFI bindings
+├── fast/                   # C — keccak, RLP, SIMD, lock-free queue, memory pool
+│   ├── src/                # Implementation
+│   ├── include/            # Headers
+│   └── test/               # Test suite
+├── network/                # Go — mempool monitor, pipeline, relay, metrics
+│   ├── cmd/mev-node/       # Entry point
+│   ├── internal/           # Core packages (block, gas, mempool, pipeline, relay, rpc, metrics)
+│   └── pkg/                # Public packages (config, types)
+├── config/                 # Chain configs (arbitrum.json, dex.json, tokens.json)
+├── scripts/                # Build and deploy scripts
+└── docker/                 # Container runtime
+```
+
+## License
+
+Proprietary. See [LICENSE](LICENSE) for details.

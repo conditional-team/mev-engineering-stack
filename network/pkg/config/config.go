@@ -36,7 +36,7 @@ type MetricsConfig struct {
 // Load reads configuration from environment variables with sensible defaults
 func Load() (*Node, error) {
 	endpoints := envStringSlice("MEV_RPC_ENDPOINTS", []string{
-		"wss://eth-mainnet.g.alchemy.com/v2/demo",
+		"wss://arb-mainnet.g.alchemy.com/v2/demo",
 	})
 
 	if len(endpoints) == 0 {
@@ -66,14 +66,14 @@ func Load() (*Node, error) {
 			}),
 		},
 		Block: block.Config{
-			BufferSize:    envInt("MEV_BLOCK_BUFFER", 16),
-			PollInterval:  envDuration("MEV_BLOCK_POLL_INTERVAL", time.Second),
-			MaxReorgDepth: envInt("MEV_BLOCK_MAX_REORG", 64),
+			BufferSize:    envInt("MEV_BLOCK_BUFFER", 64),
+			PollInterval:  envDuration("MEV_BLOCK_POLL_INTERVAL", 250*time.Millisecond),
+			MaxReorgDepth: envInt("MEV_BLOCK_MAX_REORG", 128),
 			TrackBaseFee:  envBool("MEV_BLOCK_TRACK_BASEFEE", true),
 		},
 		Gas: gas.Config{
-			HistorySize:              envInt("MEV_GAS_HISTORY", 20),
-			UpdateInterval:           envDuration("MEV_GAS_UPDATE_INTERVAL", 12*time.Second),
+			HistorySize:              envInt("MEV_GAS_HISTORY", 50),
+			UpdateInterval:           envDuration("MEV_GAS_UPDATE_INTERVAL", 250*time.Millisecond),
 			ElasticityMultiplier:     uint64(envInt("MEV_GAS_ELASTICITY", 2)),
 			BaseFeeChangeDenominator: uint64(envInt("MEV_GAS_DENOMINATOR", 8)),
 		},
