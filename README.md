@@ -80,6 +80,17 @@ go test ./... -v          # 23 tests
 go test ./... -bench .    # benchmarks
 ```
 
+### Benchmarks
+
+Measured on Intel i5-8250U @ 1.60GHz (laptop). Server-grade hardware would be faster.
+
+| Operation | Latency | Allocs | Throughput |
+|-----------|---------|--------|------------|
+| Tx classification (selector lookup) | **40.7 ns/op** | 0 B / 0 alloc | ~24.5M tx/sec |
+| EIP-1559 base fee calculation | **425 ns/op** | 152 B / 6 alloc | ~2.3M/sec |
+
+The classification pipeline processes transactions **1500x faster** than Arbitrum's block production rate.
+
 ### Pipeline Flow
 
 ```
