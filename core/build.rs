@@ -1,76 +1,104 @@
-//! Build script for linking C hot path library
-//! Compiles C sources with maximum SIMD optimizations
+//! Build script — compiles C hot path library + gRPC protobuf
 
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Declare custom cfg flags
+    println!("cargo::rustc-check-cfg=cfg(has_c_fast_path)");
+
+    // ── gRPC proto compilation ──────────────────────────────────
+    let proto_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .parent()
+        .unwrap()
+        .join("proto")
+        .join("mev.proto");
+
+    if proto_path.exists() {
+        println!("cargo:rerun-if-changed={}", proto_path.display());
+
+        // Only compile proto if protoc is available
+        let has_protoc = std::process::Command::new("protoc")
+            .arg("--version")
+            .output()
+            .is_ok();
+
+        if has_protoc {
+            tonic_build::configure()
+                .build_server(true)
+                .build_client(true)
+                .out_dir("src/grpc")
+                .compile(&[&proto_path], &[proto_path.parent().unwrap()])
+                .expect("Failed to compile proto");
+        } else {
+            println!("cargo:warning=protoc not found — using pre-generated gRPC code");
+        }
+    }
+
+    // ── C hot path compilation (optional — gracefully skip on failure) ──
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let fast_dir = PathBuf::from(&manifest_dir).parent().unwrap().join("fast");
     
     println!("cargo:rerun-if-changed=../fast/src/");
     println!("cargo:rerun-if-changed=../fast/include/");
-    
-    // Check if we're on Windows or Unix
-    let is_windows = cfg!(target_os = "windows");
-    
-    if is_windows {
-        // Windows: Use cc crate for compilation
-        compile_with_cc(&fast_dir);
-    } else {
-        // Unix: Use Makefile
-        compile_with_make(&fast_dir);
+
+    if !fast_dir.join("src").exists() {
+        println!("cargo:warning=fast/src not found — skipping C hot path");
+        return;
     }
-    
-    // Link the library
-    println!("cargo:rustc-link-search=native={}/lib", fast_dir.display());
-    println!("cargo:rustc-link-lib=static=mev_fast");
-    
-    // Link pthread on Unix
-    if !is_windows {
-        println!("cargo:rustc-link-lib=pthread");
+
+    match compile_c_library(&fast_dir) {
+        Ok(()) => {
+            println!("cargo:rustc-link-search=native={}/lib", fast_dir.display());
+            println!("cargo:rustc-link-lib=static=mev_fast");
+            println!("cargo:rustc-cfg=has_c_fast_path");
+            if !cfg!(target_os = "windows") {
+                println!("cargo:rustc-link-lib=pthread");
+            }
+        }
+        Err(e) => {
+            println!("cargo:warning=C hot path compilation failed: {} — Rust-only mode", e);
+        }
     }
 }
 
-fn compile_with_make(fast_dir: &PathBuf) {
-    let status = Command::new("make")
+fn compile_c_library(fast_dir: &PathBuf) -> Result<(), String> {
+    if cfg!(target_os = "windows") {
+        compile_with_cc(fast_dir)
+    } else {
+        compile_with_make(fast_dir)
+    }
+}
+
+fn compile_with_make(fast_dir: &PathBuf) -> Result<(), String> {
+    let _ = Command::new("make")
         .current_dir(fast_dir)
         .arg("clean")
-        .status()
-        .expect("Failed to run make clean");
-    
-    if !status.success() {
-        eprintln!("Warning: make clean failed");
-    }
+        .status();
     
     let status = Command::new("make")
         .current_dir(fast_dir)
         .status()
-        .expect("Failed to run make");
+        .map_err(|e| format!("make: {}", e))?;
     
     if !status.success() {
-        panic!("Failed to build C library");
+        return Err("make failed".to_string());
     }
+    Ok(())
 }
 
-fn compile_with_cc(fast_dir: &PathBuf) {
+fn compile_with_cc(fast_dir: &PathBuf) -> Result<(), String> {
     let src_dir = fast_dir.join("src");
     let include_dir = fast_dir.join("include");
-    let lib_dir = fast_dir.join("lib");
-    
-    // Create lib directory
-    std::fs::create_dir_all(&lib_dir).ok();
-    
-    // Collect all C source files
+
     let sources: Vec<PathBuf> = std::fs::read_dir(&src_dir)
-        .unwrap()
+        .map_err(|e| format!("read_dir: {}", e))?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().map(|e| e == "c").unwrap_or(false))
         .collect();
-    
-    // Build with cc crate
+
     let mut build = cc::Build::new();
     
     build
@@ -79,11 +107,11 @@ fn compile_with_cc(fast_dir: &PathBuf) {
         .warnings(true)
         .extra_warnings(true);
     
-    // Add SIMD flags for MSVC or GCC/Clang
     if cfg!(target_env = "msvc") {
         build.flag("/arch:AVX2");
         build.flag("/O2");
-        build.flag("/GL");  // Link-time optimization
+        build.flag("/GL");
+        build.flag("/std:c17");
     } else {
         build.flag("-mavx2");
         build.flag("-msse4.2");
@@ -95,12 +123,10 @@ fn compile_with_cc(fast_dir: &PathBuf) {
         build.flag("-march=native");
     }
     
-    // Add all sources
-    for source in sources {
+    for source in &sources {
         println!("cargo:warning=Compiling: {:?}", source);
-        build.file(&source);
+        build.file(source);
     }
     
-    // Compile
-    build.compile("mev_fast");
+    build.try_compile("mev_fast").map_err(|e| format!("cc: {}", e))
 }

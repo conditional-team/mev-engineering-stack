@@ -19,6 +19,7 @@ pub mod ffi;
 pub mod types;
 pub mod mempool;
 pub mod bench;
+pub mod grpc;
 
 // Arbitrum-specific modules
 pub mod arbitrum;

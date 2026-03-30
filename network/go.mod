@@ -6,6 +6,7 @@ require (
 	github.com/ethereum/go-ethereum v1.13.8
 	github.com/prometheus/client_golang v1.18.0
 	github.com/rs/zerolog v1.31.0
+	google.golang.org/grpc v1.60.1
 )
 
 require (
@@ -24,6 +25,7 @@ require (
 	github.com/ethereum/c-kzg-4844 v0.4.0 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/go-ole/go-ole v1.2.5 // indirect
+	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/golang/snappy v0.0.5-0.20220116011046-fa5810519dcb // indirect
 	github.com/gorilla/websocket v1.5.1 // indirect
 	github.com/holiman/uint256 v1.2.4 // indirect
@@ -50,8 +52,10 @@ require (
 	golang.org/x/net v0.19.0 // indirect
 	golang.org/x/sync v0.6.0 // indirect
 	golang.org/x/sys v0.16.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/tools v0.15.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20231212172506-995d672761c0 // indirect
 	google.golang.org/protobuf v1.31.0 // indirect
 	rsc.io/tmplfunc v0.0.3 // indirect
 )

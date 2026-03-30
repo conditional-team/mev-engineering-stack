@@ -24,7 +24,6 @@ const (
 	Arbitrage OpportunityType = iota
 	Backrun
 	Liquidation
-	Sandwich
 )
 
 // DexType enum

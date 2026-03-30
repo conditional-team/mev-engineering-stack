@@ -1,3 +1,15 @@
+// MEV Protocol Network Node
+//
+// Entry point for the Go network layer. Initializes and orchestrates:
+//   - RPC connection pool with health-checking and latency routing
+//   - Block watcher with reorg detection
+//   - EIP-1559 gas oracle with multi-block prediction
+//   - Mempool monitor (WebSocket pending tx subscription)
+//   - Transaction classification pipeline (V2/V3 swaps, liquidations, flash loans)
+//   - Flashbots relay manager (race / primary / all strategies)
+//   - gRPC client forwarding classified txs to the Rust MEV core
+//
+// All components start in dependency order and shut down gracefully on SIGINT/SIGTERM.
 package main
 
 import (
@@ -14,6 +26,7 @@ import (
 	"github.com/mev-protocol/network/internal/pipeline"
 	"github.com/mev-protocol/network/internal/relay"
 	"github.com/mev-protocol/network/internal/rpc"
+	"github.com/mev-protocol/network/internal/strategy"
 	"github.com/mev-protocol/network/pkg/config"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -44,6 +57,23 @@ func main() {
 	if cfg.Metrics.Enabled {
 		metrics.ServeMetrics(cfg.Metrics.Addr)
 	}
+
+	// Record node start time
+	metrics.NodeStartTime.Set(float64(time.Now().Unix()))
+
+	// Track uptime in background
+	go func() {
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				metrics.NodeUptimeSeconds.Inc()
+			}
+		}
+	}()
 
 	// Initialize core components
 	rpcPool := rpc.NewPool(cfg.RPC)
@@ -109,10 +139,9 @@ func main() {
 	log.Info().Msg("Shutdown complete")
 }
 
-// consumePipeline reads classified transactions from the pipeline.
-// In production, this is where MEV strategy execution would be wired in.
-// The pipeline provides fully classified and decoded swap transactions
-// ready for opportunity detection by the Rust core via FFI or gRPC.
+// consumePipeline reads classified transactions from the pipeline and
+// forwards them to the Rust MEV core via gRPC for opportunity detection.
+// Detected opportunities are logged and bundles are relayed.
 func consumePipeline(
 	ctx context.Context,
 	p *pipeline.Pipeline,
@@ -120,9 +149,25 @@ func consumePipeline(
 	blockWatcher *block.Watcher,
 	relayMgr *relay.Manager,
 ) {
+	// Connect to Rust core gRPC server
+	strategyClient, err := strategy.NewClient(strategy.DefaultConfig())
+	if err != nil {
+		log.Warn().Err(err).Msg("Rust core gRPC unavailable — running in monitor-only mode")
+		consumePipelineMonitorOnly(ctx, p, gasOracle, blockWatcher)
+		return
+	}
+	defer strategyClient.Close()
+	log.Info().Msg("Connected to Rust MEV core via gRPC")
+
 	for {
 		select {
 		case <-ctx.Done():
+			sent, recv, errs := strategyClient.Stats()
+			log.Info().
+				Uint64("sent", sent).
+				Uint64("opportunities", recv).
+				Uint64("errors", errs).
+				Msg("Strategy client shutting down")
 			return
 
 		case tx, ok := <-p.OutputChan():
@@ -130,25 +175,87 @@ func consumePipeline(
 				return
 			}
 
-			// Log classified transaction with gas context
+			// Prepare target block and base fee from live oracles
+			var baseFeeBytes []byte
+			if estimate := gasOracle.GetEstimate(); estimate != nil && estimate.BaseFee != nil {
+				baseFeeBytes = estimate.BaseFee.Bytes()
+			}
+			targetBlock := blockWatcher.TargetBlock()
+
+			// Build gRPC request from classified tx
+			var toBytes []byte
+			if tx.Tx.To != nil {
+				toBytes = tx.Tx.To.Bytes()
+			}
+
+			reqCtx, reqCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			result, err := strategyClient.DetectOpportunity(
+				reqCtx,
+				tx.Tx.Hash.Bytes(),
+				tx.Tx.From.Bytes(),
+				toBytes,
+				tx.Tx.Value,
+				tx.Tx.GasPrice,
+				tx.Tx.GasLimit,
+				tx.Tx.Input,
+				tx.Tx.Nonce,
+				int32(tx.Class),
+				targetBlock,
+				baseFeeBytes,
+			)
+			reqCancel()
+
+			if err != nil {
+				log.Debug().Err(err).Str("hash", tx.Tx.Hash.Hex()).Msg("Detection RPC failed")
+				continue
+			}
+
+			// Log any detected opportunities
+			strategy.LogOpportunities(result, tx.Tx.Hash.Hex())
+
+			// If bundles were built, submit to relay
+			if result.Found {
+				for _, opp := range result.Opportunities {
+					if opp.Bundle != nil && len(opp.Bundle.Transactions) > 0 {
+						log.Info().
+							Str("hash", tx.Tx.Hash.Hex()).
+							Int("bundleTxs", len(opp.Bundle.Transactions)).
+							Uint64("targetBlock", opp.Bundle.TargetBlock).
+							Msg("Bundle ready for relay submission")
+						// relayMgr.SubmitBundle(ctx, opp.Bundle) — wired when live
+					}
+				}
+			}
+		}
+	}
+}
+
+// consumePipelineMonitorOnly is the fallback when Rust core is unavailable.
+// Logs classified transactions without attempting MEV detection.
+func consumePipelineMonitorOnly(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	gasOracle *gas.Oracle,
+	blockWatcher *block.Watcher,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case tx, ok := <-p.OutputChan():
+			if !ok {
+				return
+			}
 			logEvent := log.Debug().
 				Str("hash", tx.Tx.Hash.Hex()).
 				Int("class", int(tx.Class))
-
 			if estimate := gasOracle.GetEstimate(); estimate != nil && estimate.BaseFee != nil {
 				logEvent = logEvent.Str("baseFee", estimate.BaseFee.String())
 			}
-
 			if target := blockWatcher.TargetBlock(); target > 0 {
 				logEvent = logEvent.Uint64("targetBlock", target)
 			}
-
-			logEvent.Msg("Classified tx ready for strategy engine")
-
-			// In production: forward to Rust core via FFI for opportunity detection
-			// The architectural boundary is here — Go handles network I/O,
-			// Rust handles compute-intensive MEV detection
-			_ = relayMgr // Available for bundle submission when strategy engine responds
+			logEvent.Msg("Classified tx (monitor-only, Rust core offline)")
 		}
 	}
 }

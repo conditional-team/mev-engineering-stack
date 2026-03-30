@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+// MEV Protocol — gRPC service definition
+//
+// Defines the RPC contract between the Go network layer (client) and
+// the Rust MEV core engine (server). All uint256 values are encoded
+// as big-endian byte arrays to preserve full 256-bit precision.
+
+package mev;
+
+option go_package = "github.com/mev-protocol/network/internal/strategy/proto";
+
+// MevEngine — the Rust core exposes this gRPC service.
+// Go network layer streams classified transactions and receives
+// detected opportunities with pre-built bundles.
+service MevEngine {
+  // Unary: send a single classified transaction, receive detection result
+  rpc DetectOpportunity(ClassifiedTransaction) returns (DetectionResult);
+
+  // Server-streaming: subscribe to all detected opportunities in real time
+  rpc StreamOpportunities(StreamRequest) returns (stream DetectionResult);
+
+  // Health/stats endpoint
+  rpc GetStatus(StatusRequest) returns (StatusResponse);
+}
+
+// ClassifiedTransaction — a pending mempool tx with pipeline classification.
+// Mirrors Go's pipeline.ClassifiedTx struct.
+message ClassifiedTransaction {
+  bytes  tx_hash      = 1;  // Keccak-256 transaction hash (32 bytes)
+  bytes  from         = 2;  // Sender address (20 bytes)
+  bytes  to           = 3;  // Recipient address (20 bytes, empty for creation)
+  bytes  value        = 4;  // ETH value in wei (uint256 big-endian)
+  uint64 gas_price    = 5;  // Gas price in gwei
+  uint64 gas_limit    = 6;  // Maximum gas units
+  bytes  input        = 7;  // Raw ABI-encoded calldata
+  uint64 nonce        = 8;  // Sender nonce
+  TxClass tx_class    = 9;  // Pipeline classification result
+  SwapInfo swap_info  = 10; // Decoded swap params (populated for swap txs)
+  uint64 target_block = 11; // Next block number from block watcher
+  bytes  base_fee     = 12; // Current base fee (uint256 big-endian)
+}
+
+// TxClass — transaction classification from the Go pipeline.
+// Enum values match pipeline.TxClass constants.
+enum TxClass {
+  UNKNOWN      = 0; // Unrecognized selector
+  SWAP_V2      = 1; // UniswapV2-style swap (6 selectors)
+  SWAP_V3      = 2; // UniswapV3-style swap (4 selectors)
+  TRANSFER     = 3; // ERC20 transfer/transferFrom
+  APPROVAL     = 4; // ERC20 approve
+  LIQUIDATION  = 5; // Aave/Compound liquidation call
+  FLASH_LOAN   = 6; // Flash loan initiation (Balancer/Aave)
+}
+
+// SwapInfo — decoded swap parameters from calldata.
+message SwapInfo {
+  bytes  amount_in      = 1; // Input token amount (uint256 big-endian)
+  bytes  amount_out_min = 2; // Minimum output (slippage bound, uint256)
+  uint32 path_length    = 3; // Number of tokens in the swap path
+  uint64 deadline       = 4; // Unix timestamp deadline
+}
+
+// DetectionResult — response from the Rust detection pipeline.
+message DetectionResult {
+  bool   found                 = 1; // Whether any MEV opportunities were found
+  repeated Opportunity opportunities = 2; // Detected opportunities with bundles
+  uint64 detection_latency_ns  = 3; // End-to-end detection time in nanoseconds
+}
+
+// Opportunity — a detected MEV opportunity with an optional pre-built bundle.
+message Opportunity {
+  OpportunityType type       = 1; // MEV strategy classification
+  string token_in            = 2; // Input token address (hex)
+  string token_out           = 3; // Output token address (hex)
+  bytes  amount_in           = 4; // Flash loan / swap amount (uint256)
+  bytes  expected_profit     = 5; // Estimated profit after gas (uint256)
+  uint64 gas_estimate        = 6; // Estimated gas for the full bundle
+  Bundle bundle              = 7; // Pre-built Flashbots bundle (if simulation passed)
+}
+
+// OpportunityType — MEV strategy classification.
+enum OpportunityType {
+  ARBITRAGE       = 0; // Cross-DEX price discrepancy
+  BACKRUN         = 1; // Price recovery after large swap
+  LIQUIDATION_OPP = 2; // Under-collateralized position liquidation
+}
+
+// Bundle — ordered set of transactions for Flashbots relay submission.
+message Bundle {
+  repeated BundleTx transactions = 1; // Ordered transactions in the bundle
+  uint64 target_block            = 2; // Preferred inclusion block
+}
+
+// BundleTx — a single transaction within a Flashbots bundle.
+message BundleTx {
+  bytes  to                       = 1; // Executor contract address (20 bytes)
+  bytes  value                    = 2; // ETH value (uint256, typically 0)
+  uint64 gas_limit                = 3; // Gas limit for this tx
+  bytes  max_fee_per_gas          = 4; // EIP-1559 max fee (uint256)
+  bytes  max_priority_fee_per_gas = 5; // Miner tip for bundle ordering (uint256)
+  bytes  data                     = 6; // ABI-encoded executor calldata
+}
+
+// StreamRequest — subscribe to real-time opportunity stream.
+message StreamRequest {
+  bytes min_profit = 1; // Minimum profit threshold (wei, uint256 big-endian)
+}
+
+// StatusRequest — empty request for health check.
+message StatusRequest {}
+
+// StatusResponse — engine health and cumulative counters.
+message StatusResponse {
+  bool   running                = 1; // Whether the engine is actively processing
+  uint64 opportunities_detected = 2; // Total opportunities found since start
+  uint64 simulations_run        = 3;
+  uint64 bundles_built          = 4;
+  uint64 uptime_seconds         = 5;
+}
