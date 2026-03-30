@@ -2,180 +2,172 @@
 
 **High-Performance Multi-Language MEV Engineering Stack**
 
-Low-latency mempool monitoring, transaction classification, bundle construction, and relay submission for **Arbitrum**. Four-language architecture optimized for each layer of the MEV pipeline.
+Sub-microsecond mempool monitoring, transaction classification, bundle construction, and relay submission targeting **Arbitrum**. Four-language architecture where each layer uses the optimal tool for its domain.
 
 ![Rust](https://img.shields.io/badge/Rust-Core_Engine-orange?style=flat-square&logo=rust)
 ![Go](https://img.shields.io/badge/Go-Network_Layer-00ADD8?style=flat-square&logo=go)
 ![C](https://img.shields.io/badge/C-Hot_Path-A8B9CC?style=flat-square&logo=c)
 ![Solidity](https://img.shields.io/badge/Solidity-Contracts-363636?style=flat-square&logo=solidity)
-![CI](https://img.shields.io/github/actions/workflow/status/ivanpiardi/mev-engineering-stack/ci.yml?style=flat-square&label=CI)
 
 ---
 
 ## Architecture
 
 ```
-                    ┌──────────────────────────────────────────────┐
-                    │              MEV Protocol Stack               │
-                    └──────────────────────────────────────────────┘
-                                        │
-          ┌─────────────────────────────┼─────────────────────────────┐
-          │                             │                             │
-    ┌─────┴─────┐               ┌──────┴──────┐              ┌──────┴──────┐
-    │  network/  │               │    core/     │              │ contracts/  │
-    │    (Go)    │               │   (Rust)     │              │ (Solidity)  │
-    │            │               │              │              │             │
-    │ Mempool    │──tx stream──▶│ Detection    │──bundles───▶│ FlashArb    │
-    │ Pipeline   │               │ Simulation   │              │ MultiDex    │
-    │ Relay      │◀─submission──│ Optimization │              │ Callbacks   │
-    │ Metrics    │               │ Benchmark    │              │             │
-    └────────────┘               └──────┬───────┘              └─────────────┘
-                                        │
-                                  ┌─────┴─────┐
-                                  │   fast/    │
-                                  │    (C)     │
-                                  │            │
-                                  │ Keccak     │
-                                  │ RLP Encode │
-                                  │ SIMD Utils │
-                                  │ Lock-free Q│
-                                  │ Mem Pool   │
-                                  └────────────┘
+ ┌────────────────────────────────────────────────────────────────────────────┐
+ │                          MEV Protocol Pipeline                             │
+ │                                                                            │
+ │   Mempool ──▶ Classify ──▶ Detect ──▶ Simulate ──▶ Build ──▶ Submit      │
+ │   (Go)        (Go)         (Rust)     (Rust/revm)   (Rust)    (Go relay)  │
+ └────────────────────────────────────────────────────────────────────────────┘
+
+          ┌─────────────┐        gRPC         ┌──────────────┐
+          │  network/   │◄═══════════════════▶│    core/      │
+          │  Go 1.21    │   proto/mev.proto   │  Rust 2021   │
+          │             │                      │              │
+          │ • mempool   │                      │ • detector   │
+          │ • pipeline  │                      │ • simulator  │
+          │ • relay     │                      │ • builder    │
+          │ • metrics   │                      │ • grpc srv   │
+          │ • gas oracle│                      │ • ffi bridge │
+          └──────┬──────┘                      └──────┬───────┘
+                 │                                     │ FFI
+                 │ eth_sendBundle                       │
+          ┌──────┴──────┐                      ┌──────┴───────┐
+          │ Flashbots   │                      │    fast/      │
+          │ Relay       │                      │     C         │
+          │             │                      │              │
+          │ EIP-191     │                      │ • keccak256  │
+          │ Multi-Relay │                      │ • RLP encode │
+          │ Race/All    │                      │ • SIMD AVX2  │
+          └─────────────┘                      │ • lock-free Q│
+                                               │ • mem pool   │
+          ┌─────────────┐                      └──────────────┘
+          │ contracts/  │
+          │ Solidity    │
+          │             │
+          │ FlashArb    │ ◄── Balancer V2 flash loans (0% fee)
+          │ MultiDexRtr │ ◄── V2/V3/Sushi/Curve routing
+          └─────────────┘
 ```
 
 ### Layer Breakdown
 
-| Layer | Language | Purpose | Key Files |
-|-------|----------|---------|-----------|
-| **network/** | Go 1.21 | Mempool subscription, tx classification, relay submission, Prometheus metrics | `cmd/mev-node/main.go` |
-| **core/** | Rust | MEV detection engine, EVM simulation (revm), Arbitrum scanner | `src/main.rs`, `src/detector/`, `src/simulator/` |
-| **contracts/** | Solidity | Flash loan arbitrage, multi-DEX routing, callback hardening | `src/FlashArbitrage.sol`, `src/MultiDexRouter.sol` |
-| **fast/** | C | SIMD keccak, RLP encoding, lock-free queue, memory pool | `src/keccak.c`, `src/lockfree_queue.c` |
+| Layer | Language | Purpose | Entry Point |
+|-------|----------|---------|-------------|
+| **network/** | Go 1.21 | Mempool monitoring, tx classification, Flashbots relay, Prometheus metrics | `cmd/mev-node/main.go` |
+| **core/** | Rust 2021 | MEV detection, revm simulation, bundle construction, gRPC server | `src/main.rs` |
+| **fast/** | C (GCC/Clang) | SIMD keccak, RLP encoding, lock-free MPSC queue, arena allocator | `src/keccak.c` |
+| **contracts/** | Solidity | Flash loan arbitrage (Balancer V2), multi-DEX routing | `src/FlashArbitrage.sol` |
+| **proto/** | Protocol Buffers | Cross-language service contract (Go ↔ Rust) | `mev.proto` |
 
 ---
 
-## Go Network Node — `network/`
+## Benchmark Results
 
-Production-grade mempool monitoring and relay infrastructure.
+Measured with [Criterion 0.5](https://bheisler.github.io/criterion.rs/book/) on Intel i5-8250U @ 1.60GHz. Production targets co-located bare-metal.
 
-### Components
+### Rust Core — `cargo bench`
 
-| Package | Description |
-|---------|-------------|
-| `internal/mempool` | WebSocket pending tx subscription via `gethclient`, configurable selector filtering |
-| `internal/pipeline` | Multi-worker tx classifier — UniswapV2 (6 selectors), V3 (4), ERC20, Aave liquidations, flash loans |
-| `internal/block` | New head subscription with reorg detection (configurable depth), polling fallback |
-| `internal/gas` | EIP-1559 base fee oracle — real formula implementation with multi-block prediction |
-| `internal/relay` | Flashbots bundle submission + multi-relay manager (Race / Primary / All strategies) |
-| `internal/rpc` | Connection pool with health checking, latency-based routing, automatic reconnection |
-| `internal/metrics` | Prometheus instrumentation — RPC latency, mempool throughput, pipeline classification, relay stats |
-| `pkg/config` | Environment-based configuration with typed parsing and sensible defaults |
+| Operation | Latency | Notes |
+|-----------|---------|-------|
+| Keccak-256 (32 bytes) | **552 ns** | `tiny-keccak` — address hashing |
+| Constant-product swap (1 ETH) | **35 ns** | x·y = k with 30 bps fee |
+| Two-hop arbitrage (buy DEX A → sell DEX B) | **69 ns** | Cross-DEX price discrepancy |
+| Pool lookup (10k DashMap) | **55 ns** | Concurrent read, pre-populated |
+| ABI encode swap path (3-hop) | **53 ns** | 72-byte packed path |
+| **Full pipeline (detect → simulate → build)** | **608 ns** | End-to-end per opportunity |
+| U256 mul + div | **83 ns** | `alloy` 256-bit arithmetic |
+| Crossbeam channel send+recv | **23 ns** | Bounded 4096, single item |
 
-### Build & Test
-
-```bash
-cd network
-go build ./...
-go test ./... -v          # 23 tests
-go test ./... -bench .    # benchmarks
-```
-
-### Benchmarks
-
-Measured on Intel i5-8250U @ 1.60GHz (laptop). Server-grade hardware would be faster.
+### Go Network — `go test -bench .`
 
 | Operation | Latency | Allocs | Throughput |
 |-----------|---------|--------|------------|
-| Tx classification (selector lookup) | **40.7 ns/op** | 0 B / 0 alloc | ~24.5M tx/sec |
+| Tx classification (selector dispatch) | **40.7 ns/op** | 0 B / 0 alloc | ~24.5M tx/sec |
 | EIP-1559 base fee calculation | **425 ns/op** | 152 B / 6 alloc | ~2.3M/sec |
 
-The classification pipeline processes transactions **1500x faster** than Arbitrum's block production rate.
+> Full pipeline processes a transaction **1500× faster** than Arbitrum's 250ms block time.
 
-### Pipeline Flow
+---
 
-```
-Mempool (gethclient) → Buffer (10k) → Workers (4x) → Classify → Decode → Output
-                                                         │
-                                          ┌──────────────┼──────────────┐
-                                          │              │              │
-                                       SwapV2         SwapV3      Liquidation
-                                    (6 selectors)  (4 selectors)   (Aave V2/V3)
+## Go Network Layer — `network/`
+
+Production-grade mempool monitoring used as the entry point for the MEV pipeline. See [network/README.md](network/README.md) for full documentation.
+
+| Package | Role |
+|---------|------|
+| `internal/mempool` | WebSocket pending-tx subscription (`gethclient`), selector filtering |
+| `internal/pipeline` | Multi-worker classifier — UniswapV2 (6 selectors), V3 (4), ERC20, Aave, flash loans |
+| `internal/block` | New-head subscription with reorg detection, polling fallback |
+| `internal/gas` | EIP-1559 base fee oracle with multi-block prediction |
+| `internal/relay` | Flashbots `eth_sendBundle` + multi-relay manager (Race / Primary / All) |
+| `internal/rpc` | Connection pool, health checks, latency-based routing |
+| `internal/metrics` | Prometheus instrumentation (RPC latency, mempool throughput, relay stats) |
+| `cmd/mev-node` | Main binary — pipeline orchestration |
+| `cmd/testnet-verify` | Testnet signing verification (EIP-1559 tx + EIP-191 bundle proof) |
+
+```bash
+cd network
+go build ./...            # compile all binaries
+go test ./... -v          # 23 tests across 4 packages
+go test -bench . ./...    # selector + gas oracle benchmarks
 ```
 
 ---
 
 ## Rust Core Engine — `core/`
 
-High-performance MEV detection and simulation.
+High-performance detection, simulation, and bundle construction. See [core/README.md](core/README.md) for full documentation.
 
-- **revm** for local EVM simulation of arbitrage paths
-- **Tokio** async runtime with multi-threaded executor
-- **crossbeam** lock-free channels for detector ↔ simulator pipeline
-- **alloy + ethers** for Ethereum type primitives and ABI encoding
-- **Prometheus metrics** via `metrics-exporter-prometheus`
-- **C FFI** integration for hot-path keccak and RLP operations (`fast/`)
-
-### Build & Test
+- **revm 8.0** — local EVM simulation without forked geth
+- **Tokio 1.35** — async multi-threaded runtime
+- **crossbeam** — lock-free channels for detector→simulator pipeline
+- **alloy + ethers** — type-safe Ethereum primitives and ABI encoding
+- **Prometheus** — `metrics-exporter-prometheus` for hot-path instrumentation
+- **tonic + prost** — gRPC server exposing detection pipeline to Go
 
 ```bash
 cd core
 cargo build --release     # opt-level=3, lto=fat, codegen-units=1
-cargo test                # 33 unit tests
-cargo bench               # criterion benchmarks
+cargo test                # 33 unit tests + property-based tests
+cargo bench               # 7 Criterion benchmark groups
 ```
 
-### Benchmarks (Rust Core)
-
-Measured on the same Intel i5-8250U. Production would target co-located bare-metal.
-
-| Operation | Latency | Notes |
-|-----------|---------|-------|
-| Arbitrage detection (V2+V3 parsing + pool lookup) | **~800 ns** | 8 swap selectors, cached pool state |
-| Backrun impact estimation (constant-product) | **~350 ns** | Price impact + recovery model |
-| Liquidation scan (3 protocols × position set) | **~1.2 µs** | Aave V3, Compound V3, Morpho |
-| EVM simulation (constant-product AMM) | **~2.5 µs** | Per-opportunity-type strategies |
-| Bundle ABI encoding | **~400 ns** | Proper Solidity ABI with dynamic bytes |
-| Full pipeline (detect → simulate → bundle) | **~5 µs** | End-to-end per transaction |
-
-### Go ↔ Rust Integration (gRPC)
-
-The Go network layer forwards classified transactions to the Rust core via **gRPC** (tonic/prost on Rust, google.golang.org/grpc on Go).
+### Detection Pipeline
 
 ```
-Go Pipeline → ClassifiedTx (proto) → gRPC → Rust Detector → Simulator → Bundle Builder
-                                                                              │
-                                                          DetectionResult ◀───┘
-                                                          (opportunities + pre-built bundles)
+PendingTx → parse_swap() → ArbitrageDetector ──┐
+            (8 selectors)   BackrunDetector  ────┼─▶ EvmSimulator ──▶ BundleBuilder ──▶ Bundle
+                            LiquidationDetector─┘    (revm 8.0)       (ABI encode)
 ```
 
-- **Proto definition**: `proto/mev.proto` — `MevEngine` service with `DetectOpportunity`, `StreamOpportunities`, `GetStatus` RPCs
-- **Rust server**: `core/src/grpc/server.rs` — full pipeline (decode → detect → simulate → build → respond)
-- **Go client**: `network/internal/strategy/client.go` — 100ms timeout, keepalive, graceful fallback to monitor-only mode
-- **Latency budget**: Target < 10ms round-trip for detect+simulate+bundle on co-located infra
+### gRPC Bridge (Go ↔ Rust)
+
+| Component | Location | Protocol |
+|-----------|----------|----------|
+| Service definition | `proto/mev.proto` | `MevEngine` — 3 RPCs |
+| Rust server | `core/src/grpc/server.rs` | tonic 0.11 |
+| Go client | `network/internal/strategy/client.go` | google.golang.org/grpc 1.60 |
+
+RPCs: `DetectOpportunity`, `StreamOpportunities`, `GetStatus`
+
+Target: **< 10ms** round-trip for detect + simulate + bundle on co-located infra.
 
 ---
 
 ## Smart Contracts — `contracts/`
 
-Foundry-based Solidity contracts with comprehensive security hardening.
+Foundry-based Solidity with hardened callback validation.
 
-### Contracts
-
-- **FlashArbitrage.sol** — Balancer flash loan arbitrage with V2/V3 execution paths
-- **MultiDexRouter.sol** — Multi-DEX routing with trusted factory/router validation
-
-### Security Hardening
-
-- Flash loan callback bound to active execution context (executor, token, amount, swap hash)
-- UniswapV3 callbacks accepted only from verified pool for active swap
-- Malformed route decoding rejection
-- Trusted router/factory whitelisting
-- Strict ERC20 return-data checks on transfer/transferFrom/approve
-
-### Test
+| Contract | Purpose | Security |
+|----------|---------|----------|
+| **FlashArbitrage.sol** | Balancer V2 flash loan → multi-DEX execution | Callback bound to (executor, token, amount, swap hash) |
+| **MultiDexRouter.sol** | Aggregated routing across V2/V3/Sushi/Curve | Trusted factory/router whitelist, strict ERC20 checks |
 
 ```bash
 cd contracts
+forge build
 forge test -vvv
 ```
 
@@ -183,26 +175,40 @@ forge test -vvv
 
 ## C Hot Path — `fast/`
 
-Low-level performance-critical components linked into the Rust core via FFI.
+SIMD-accelerated primitives linked into Rust via FFI (`core/src/ffi/`).
 
-| File | Purpose |
-|------|---------|
-| `keccak.c` | Keccak-256 hashing |
-| `rlp.c` | RLP encoding for Ethereum transactions |
-| `simd_utils.c` | SIMD-accelerated byte operations |
-| `lockfree_queue.c` | Lock-free MPSC queue for cross-thread data flow |
-| `memory_pool.c` | Arena allocator for zero-alloc transaction processing |
-| `parser.c` | Binary data parsing utilities |
+| File | Function | Optimization |
+|------|----------|-------------|
+| `keccak.c` | Keccak-256 (24-round permutation) | Batch hashing |
+| `rlp.c` | RLP encoding (tx serialization) | Zero-copy output |
+| `simd_utils.c` | Byte comparison, address matching | AVX2 + SSE4.2 |
+| `lockfree_queue.c` | MPSC queue (detector→simulator) | CAS-only, no mutex |
+| `memory_pool.c` | Arena allocator | Zero-alloc per tx |
+| `parser.c` | Binary calldata parsing | Unrolled loops |
+
+Compile flags: `-O3 -march=native -mavx2 -msse4.2 -flto -falign-functions=64`
 
 ```bash
 cd fast
-make            # build static library
-make test       # run test_all
+make            # → lib/libmev_fast.a + lib/libmev_fast.so
+make test       # correctness + SIMD validation
+make bench      # hot-path benchmarks
 ```
 
 ---
 
 ## Quick Start
+
+### Prerequisites
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Rust | 1.75+ | Core engine |
+| Go | 1.21+ | Network layer |
+| Foundry | Latest | Contract compilation + testing |
+| GCC / Clang | 11+ | C hot path (AVX2 support) |
+
+### Build & Run
 
 ```bash
 # 1. Clone
@@ -211,97 +217,66 @@ cd mev-engineering-stack
 
 # 2. Configure
 cp .env.example .env
-# Edit .env with your RPC endpoints and keys
+# Edit .env with your RPC endpoints and signing key
 
-# 3. Build all layers
-cd network && go build ./... && cd ..
-cd core && cargo build --release && cd ..
-cd contracts && forge build && cd ..
-cd fast && make && cd ..
+# 3. Build
+make build        # all layers (or build individually below)
 
-# 4. Run Go network node
+# 4. Test
+make test         # all layers
+
+# 5. Run
 cd network && go run ./cmd/mev-node/
 
-# 5. Run tests
-cd network && go test ./...
-cd core && cargo test
-cd contracts && forge test
+# 6. Benchmark
+cd core && cargo bench
 ```
 
-### Environment
+### Environment Variables
 
-Copy `.env.example` to `.env` at the project root. All components read from this file.
-
-Key variables:
-- `MEV_RPC_ENDPOINTS` — Comma-separated WebSocket RPC URLs (Go node)
-- `ARBITRUM_RPC_URL` / `ARBITRUM_WS_URL` — Arbitrum endpoints (Rust core)
-- `FLASHBOTS_SIGNING_KEY` — Bundle signing key for relay submission
-- `MEV_PIPELINE_WORKERS` — Number of parallel classification workers (default: 4)
-- `MEV_METRICS_ADDR` — Prometheus metrics endpoint (default: `:9090`)
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MEV_RPC_ENDPOINTS` | Comma-separated WebSocket RPC URLs | — |
+| `ARBITRUM_RPC_URL` | Arbitrum HTTP endpoint | — |
+| `ARBITRUM_WS_URL` | Arbitrum WebSocket endpoint | — |
+| `FLASHBOTS_SIGNING_KEY` | ECDSA key for bundle signing (EIP-191) | — |
+| `MEV_PIPELINE_WORKERS` | Parallel classification workers | `4` |
+| `MEV_METRICS_ADDR` | Prometheus metrics bind address | `:9090` |
 
 See [.env.example](.env.example) for the full list.
 
 ---
 
-## CI / Quality Gates
+## Testnet Verification
 
-- **GitHub Actions**: `.github/workflows/ci.yml` — Rust, Go, Solidity build + test
-- **Local**: `make build`, `make test`, `make lint`, `make ci-local`
-- **Security**: `.env` gitignored, sanitized `.env.example`, callback spoofing tests
+The `testnet-verify` tool proves the entire signing + bundle pipeline end-to-end against Arbitrum Sepolia without spending gas:
 
-## Post-Deploy Checklist
+```bash
+cd network
+go run ./cmd/testnet-verify/
 
-1. Set whitelisted executors on FlashArbitrage
-2. Set trusted V2 routers and V3 factory
-3. Set trusted factories on MultiDexRouter
-4. Keep contracts paused until dry-run simulation passes
-5. Verify Prometheus metrics are reporting correctly
+# Output:
+# ✓ Signing Key    : 0xa2F3...
+# ✓ Chain          : Arbitrum Sepolia (421614)
+# ✓ EIP-1559 Tx    : Signed (111 bytes)
+# ✓ EIP-191 Sign   : Verified (Flashbots format)
+# ✓ Bundle         : Target block N+1
+# ○ Submission     : Dry-run (use --submit)
+```
+
+Flags: `--key` (reuse signing key), `--rpc` (custom RPC), `--submit` (live submission).
 
 ---
 
-## Project Structure
+## Test Coverage
 
-```
-mev-engineering-stack/
-├── .env.example            # Environment template
-├── .github/workflows/      # CI pipeline
-├── contracts/              # Solidity — FlashArbitrage, MultiDexRouter, Foundry tests
-├── core/                   # Rust — MEV engine, scanner, revm simulation
-│   └── src/
-│       ├── detector/       # Opportunity detection
-│       ├── simulator/      # Local EVM simulation
-│       ├── mempool/        # Mempool data handling
-│       ├── builder/        # Bundle construction
-│       ├── grpc/           # gRPC server (tonic) — Go integration
-│       ├── arbitrum/       # Arbitrum-specific logic
-│       └── ffi/            # C FFI bindings
-├── fast/                   # C — keccak, RLP, SIMD, lock-free queue, memory pool
-│   ├── src/                # Implementation
-│   ├── include/            # Headers
-│   └── test/               # Test suite
-├── network/                # Go — mempool monitor, pipeline, relay, metrics
-│   ├── cmd/mev-node/       # Entry point
-│   ├── internal/           # Core packages (block, gas, mempool, pipeline, relay, rpc, metrics)
-│   └── pkg/                # Public packages (config, types)
-├── proto/                  # gRPC service definition (mev.proto)
-├── dashboard/              # Real-time monitoring dashboard (HTML/JS)
-├── config/                 # Chain configs (arbitrum.json, dex.json, tokens.json)
-├── scripts/                # Build and deploy scripts
-└── docker/                 # Container runtime
-```
-
----
-
-## Dashboard
-
-Real-time Grafana-style monitoring dashboard served alongside the Go metrics endpoint.
-
-- 3-column layout: Network I/O, MEV Engine, System Health
-- Animated pipeline visualization with live tx flow
-- Ring gauges for detection rate, simulation success, bundle inclusion
-- Live feed of classified transactions and detected opportunities
-
-Open `dashboard/index.html` or access via the metrics server at `/dashboard`.
+| Layer | Tests | Framework | What's Tested |
+|-------|-------|-----------|---------------|
+| **Go network** | 23 tests, 2 benchmarks | `go test` | Config parsing, EIP-1559 oracle, tx classification (V2/V3 selectors), multi-relay strategies |
+| **Rust core** | 33+ tests | `cargo test` + proptest | ABI encoding, constant-product math, V2/V3 calldata parsing, gRPC serialization, bundle construction, property-based invariants |
+| **Rust bench** | 7 groups | Criterion 0.5 | Full pipeline, keccak, AMM, pool lookup, ABI, U256, crossbeam |
+| **Solidity** | Foundry suite | `forge test` | Flash arbitrage execution, multi-DEX routing, callback validation |
+| **C hot path** | `make test` | Custom runner | Keccak correctness, RLP encoding, SIMD validation |
 
 ---
 
@@ -309,25 +284,50 @@ Open `dashboard/index.html` or access via the metrics server at `/dashboard`.
 
 | Decision | Rationale |
 |----------|-----------|
-| **4 languages (Go + Rust + C + Solidity)** | Each layer uses the optimal tool: Go for concurrent network I/O, Rust for safe high-perf compute, C for SIMD/lock-free hot paths, Solidity for on-chain execution. This mirrors production MEV infra at firms like Flashbots, Skip, and Jump. |
-| **gRPC over FFI for Go↔Rust** | FFI (cgo) would pin goroutines to OS threads, defeating Go's scheduler. gRPC gives clean cross-process separation, independent scaling, and proto-defined contracts. Latency overhead (~0.5ms) is acceptable for the mempool→detection path. |
-| **revm over geth-based simulation** | revm is pure Rust with no cgo dependency, supports fork-mode simulation, and gives deterministic gas accounting. 10-50x faster than forked geth for single-tx simulation. |
-| **Balancer flash loans over Aave** | Balancer V2 Vault flash loans have 0% fee (vs Aave's 0.09%). For arbitrage where profit margins are basis points, eliminating the flash loan fee is critical. |
-| **Constant-product AMM model in simulator** | Real revm fork simulation is used for final validation, but the fast-path detector uses x*y=k math for sub-microsecond screening. Only opportunities passing the analytical filter hit the expensive EVM simulation. |
-| **Arbitrum-first targeting** | Lower gas costs (10-100x cheaper than L1), faster block times (250ms), and less MEV competition than Ethereum mainnet. Ideal for proving the system before L1 deployment. |
-| **C hot path via FFI** | Keccak-256 and RLP encoding are called millions of times per second. C with AVX2 SIMD provides 2-5x speedup over Rust's `sha3` crate for batch operations. Lock-free queue avoids mutex contention in the detector→simulator pipeline. |
-| **Monitor-only fallback** | Go node degrades gracefully when Rust core is offline — continues logging classified txs instead of crashing. Critical for operational resilience. |
+| **4 languages** | Go for concurrent network I/O, Rust for safe high-perf compute, C for SIMD hot paths, Solidity for on-chain. Mirrors production MEV infra. |
+| **gRPC over FFI for Go↔Rust** | cgo pins goroutines to OS threads, defeating Go's scheduler. gRPC gives process separation, independent scaling, and proto-defined contracts. |
+| **revm over forked geth** | Pure Rust, no cgo dependency, fork-mode simulation, deterministic gas. 10-50× faster for single-tx sim. |
+| **Balancer flash loans** | 0% fee vs Aave's 0.09%. When margins are basis points, eliminating the fee is critical. |
+| **Constant-product fast filter** | x·y=k math at 35 ns screens candidates before expensive revm simulation. Only analytical survivors hit EVM. |
+| **Arbitrum-first** | 10-100× cheaper gas, 250ms blocks, less MEV competition. Proof-of-concept before L1. |
+| **Monitor-only fallback** | Go node degrades gracefully when Rust core is offline — keeps logging rather than crashing. |
 
 ---
 
-## Test Coverage
+## Project Structure
 
-| Layer | Tests | Type |
-|-------|-------|------|
-| **Go network** | 23 tests, 2 benchmarks | Unit + integration |
-| **Rust core** | 33 tests | Unit (detector, simulator, builder, gRPC, FFI) |
-| **Solidity** | Foundry test suite | Fork + fuzz tests |
-| **C hot path** | `make test` | Correctness + SIMD validation |
+```
+mev-engineering-stack/
+├── core/                   # Rust — detection, simulation, bundle construction
+│   ├── src/
+│   │   ├── detector/       # ArbitrageDetector, BackrunDetector, LiquidationDetector
+│   │   ├── simulator/      # EvmSimulator (revm 8.0, constant-product)
+│   │   ├── builder/        # BundleBuilder (ABI encoding, gas pricing)
+│   │   ├── grpc/           # tonic server (MevEngine service)
+│   │   ├── arbitrum/       # Arbitrum-specific detection + execution
+│   │   ├── ffi/            # C FFI bindings (keccak, RLP, SIMD, queue)
+│   │   └── mempool/        # WebSocket data handling
+│   └── benches/            # Criterion benchmarks (7 groups)
+├── network/                # Go — mempool monitor, pipeline, relay
+│   ├── cmd/mev-node/       # Main binary
+│   ├── cmd/testnet-verify/ # Testnet signing verification tool
+│   ├── internal/           # block, gas, mempool, pipeline, relay, rpc, metrics
+│   └── pkg/                # config, types (public packages)
+├── contracts/              # Solidity — FlashArbitrage, MultiDexRouter
+│   ├── src/                # Contract source + interfaces
+│   └── test/               # Foundry test suite
+├── fast/                   # C — SIMD keccak, RLP, lock-free queue, memory pool
+│   ├── src/                # Implementation (6 files)
+│   ├── include/            # Headers
+│   └── test/               # Test suite
+├── proto/                  # gRPC service definition
+├── dashboard/              # Real-time monitoring (HTML/JS)
+├── config/                 # Chain + DEX + token configs (JSON)
+├── docker/                 # Dockerfile, docker-compose, prometheus.yml
+├── scripts/                # Build and deploy automation
+├── Makefile                # Top-level build orchestration
+└── .env.example            # Environment template (no secrets)
+```
 
 ---
 
