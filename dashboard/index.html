@@ -1,0 +1,1159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MEV Protocol — Live Engine</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+
+        :root {
+            --bg-0: #05080c;
+            --bg-1: #0a0f16;
+            --bg-2: #101820;
+            --bg-3: #182030;
+            --border: #1a2332;
+            --border-glow: #1e3a5f;
+            --text-0: #e8edf3;
+            --text-1: #8b95a5;
+            --text-2: #4a5568;
+            --blue: #3b82f6;
+            --cyan: #06b6d4;
+            --green: #10b981;
+            --orange: #f59e0b;
+            --red: #ef4444;
+            --purple: #8b5cf6;
+            --pink: #ec4899;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: var(--bg-0);
+            color: var(--text-0);
+            font-family: 'JetBrains Mono', monospace;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* ═══ ANIMATED BACKGROUND ═══ */
+        .bg-grid {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image:
+                linear-gradient(rgba(59,130,246,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(59,130,246,0.03) 1px, transparent 1px);
+            background-size: 60px 60px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .bg-glow {
+            position: fixed;
+            width: 600px; height: 600px;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.08;
+            pointer-events: none;
+            z-index: 0;
+        }
+        .bg-glow.blue { background: var(--blue); top: -200px; right: -100px; }
+        .bg-glow.purple { background: var(--purple); bottom: -200px; left: -100px; }
+
+        /* ═══ TOP BAR ═══ */
+        .topbar {
+            position: relative;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 28px;
+            background: rgba(10,15,22,0.85);
+            -webkit-backdrop-filter: blur(20px);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .topbar-left {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .logo-mark {
+            width: 32px; height: 32px;
+            background: linear-gradient(135deg, var(--blue), var(--purple));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 14px;
+            color: white;
+            box-shadow: 0 0 20px rgba(59,130,246,0.3);
+        }
+
+        .logo-text {
+            font-size: 16px;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+        }
+        .logo-text span { color: var(--blue); }
+
+        .badge {
+            font-size: 10px;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+        }
+        .badge-version { background: var(--bg-3); color: var(--text-1); }
+        .badge-chain { background: rgba(59,130,246,0.15); color: var(--blue); border: 1px solid rgba(59,130,246,0.2); }
+
+        .topbar-center {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-pulse {
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: var(--text-2);
+            position: relative;
+        }
+        .status-pulse.live {
+            background: var(--green);
+            box-shadow: 0 0 12px rgba(16,185,129,0.6);
+        }
+        .status-pulse.live::after {
+            content: '';
+            position: absolute;
+            inset: -4px;
+            border-radius: 50%;
+            border: 2px solid var(--green);
+            opacity: 0;
+            animation: statusRing 2s ease-out infinite;
+        }
+        .status-pulse.error { background: var(--red); box-shadow: 0 0 12px rgba(239,68,68,0.6); }
+
+        @keyframes statusRing {
+            0% { opacity: 0.6; transform: scale(1); }
+            100% { opacity: 0; transform: scale(2); }
+        }
+
+        .status-text {
+            font-size: 12px;
+            color: var(--text-1);
+            font-weight: 500;
+        }
+
+        .topbar-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            font-size: 11px;
+            color: var(--text-2);
+        }
+
+        .topbar-stat {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .topbar-stat .val { color: var(--text-1); font-weight: 500; }
+
+        /* ═══ MAIN LAYOUT ═══ */
+        .main {
+            position: relative;
+            z-index: 1;
+            display: grid;
+            grid-template-columns: 320px 1fr 320px;
+            gap: 0;
+            min-height: calc(100vh - 52px);
+            max-height: calc(100vh - 52px);
+            overflow: hidden;
+        }
+
+        /* ═══ PANELS ═══ */
+        .panel-left, .panel-right {
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            border-right: 1px solid var(--border);
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        .panel-right { border-right: none; border-left: 1px solid var(--border); }
+
+        .panel-title {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-2);
+            padding: 4px 0;
+        }
+
+        /* ═══ METRIC TILE ═══ */
+        .tile {
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px 16px;
+            position: relative;
+            overflow: hidden;
+            transition: border-color 0.3s;
+        }
+        .tile:hover { border-color: var(--border-glow); }
+
+        .tile-label {
+            font-size: 10px;
+            color: var(--text-2);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .tile-dot {
+            width: 5px; height: 5px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .tile-value {
+            font-size: 26px;
+            font-weight: 700;
+            line-height: 1.1;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .tile-sub {
+            font-size: 10px;
+            color: var(--text-2);
+            margin-top: 4px;
+        }
+
+        /* ═══ CENTER ═══ */
+        .center {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            gap: 20px;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        /* Pipeline Flow */
+        .pipeline-flow {
+            width: 100%;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 24px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .pipeline-flow::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(ellipse at center, rgba(59,130,246,0.04) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .flow-title {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-2);
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .flow-stages {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0;
+            position: relative;
+            flex-wrap: wrap;
+            row-gap: 16px;
+            padding: 8px 0;
+        }
+
+        .flow-stage {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            position: relative;
+            z-index: 2;
+        }
+
+        .stage-icon {
+            width: 48px; height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            transition: all 0.3s;
+        }
+
+        .stage-name {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--text-1);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .stage-stat {
+            font-size: 18px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .stage-rate {
+            font-size: 10px;
+            color: var(--text-2);
+        }
+
+        .flow-arrow {
+            width: 40px;
+            height: 2px;
+            background: linear-gradient(90deg, var(--border), var(--border-glow), var(--border));
+            position: relative;
+            margin: 0 2px;
+            margin-bottom: 50px;
+            flex-shrink: 0;
+        }
+
+        .flow-arrow::after {
+            content: '';
+            position: absolute;
+            right: -1px;
+            top: -3px;
+            width: 0; height: 0;
+            border-left: 6px solid var(--border-glow);
+            border-top: 4px solid transparent;
+            border-bottom: 4px solid transparent;
+        }
+
+        .flow-particle {
+            position: absolute;
+            top: -2px;
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--cyan);
+            box-shadow: 0 0 8px var(--cyan);
+            animation: flowMove 1.5s linear infinite;
+            opacity: 0.8;
+        }
+
+        @keyframes flowMove {
+            0% { left: 0; opacity: 0; }
+            20% { opacity: 0.8; }
+            80% { opacity: 0.8; }
+            100% { left: calc(100% - 6px); opacity: 0; }
+        }
+
+        /* ═══ CLASSIFICATION ═══ */
+        .class-grid {
+            width: 100%;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+        }
+
+        .class-item {
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px;
+            text-align: center;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+        .class-item:hover { border-color: var(--border-glow); transform: translateY(-2px); }
+
+        .class-item::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 2px;
+        }
+        .class-item.v2::before { background: var(--blue); }
+        .class-item.v3::before { background: var(--green); }
+        .class-item.liq::before { background: var(--red); }
+        .class-item.flash::before { background: var(--purple); }
+        .class-item.transfer::before { background: var(--orange); }
+        .class-item.unknown::before { background: var(--text-2); }
+
+        .class-icon { font-size: 20px; margin-bottom: 6px; }
+        .class-name { font-size: 10px; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.5px; }
+        .class-count { font-size: 22px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+        .class-pct { font-size: 10px; color: var(--text-2); }
+
+        /* ═══ GAS GAUGES ═══ */
+        .gas-section {
+            width: 100%;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 24px;
+        }
+
+        .gas-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .gas-meters {
+            display: flex;
+            justify-content: space-around;
+            gap: 20px;
+        }
+
+        .gas-meter {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+        }
+
+        .gauge-ring {
+            width: 90px; height: 90px;
+            position: relative;
+        }
+
+        .gauge-ring svg {
+            width: 100%; height: 100%;
+            transform: rotate(-90deg);
+        }
+
+        .gauge-bg {
+            fill: none;
+            stroke: var(--bg-3);
+            stroke-width: 4;
+        }
+
+        .gauge-fill {
+            fill: none;
+            stroke-width: 4;
+            stroke-linecap: round;
+            transition: stroke-dashoffset 0.8s ease;
+        }
+
+        .gauge-center {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .gauge-val {
+            font-size: 14px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .gauge-unit {
+            font-size: 8px;
+            color: var(--text-2);
+            text-transform: uppercase;
+        }
+
+        .gas-label {
+            font-size: 10px;
+            color: var(--text-2);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+
+        /* ═══ LIVE FEED ═══ */
+        .feed {
+            flex: 1;
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .feed-header {
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .feed-body {
+            flex: 1;
+            overflow-y: auto;
+            font-size: 11px;
+            min-height: 150px;
+        }
+
+        .feed-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-bottom: 1px solid rgba(26,35,50,0.5);
+            animation: feedIn 0.3s ease;
+        }
+
+        @keyframes feedIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        .feed-time { color: var(--text-2); font-size: 10px; min-width: 55px; }
+        .feed-tag {
+            font-size: 9px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 600;
+            min-width: 50px;
+            text-align: center;
+        }
+        .feed-tag.block { background: rgba(59,130,246,0.15); color: var(--blue); }
+        .feed-tag.tx { background: rgba(16,185,129,0.15); color: var(--green); }
+        .feed-tag.gas { background: rgba(245,158,11,0.15); color: var(--orange); }
+        .feed-tag.warn { background: rgba(239,68,68,0.15); color: var(--red); }
+        .feed-tag.opp { background: rgba(139,92,246,0.15); color: var(--purple); }
+        .feed-msg { color: var(--text-1); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* ═══ BENCH ═══ */
+        .bench-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 0;
+        }
+
+        .bench-bar-track {
+            flex: 1;
+            height: 6px;
+            background: var(--bg-3);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .bench-bar-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 1s ease;
+        }
+
+        .bench-label { font-size: 10px; color: var(--text-2); width: 80px; text-align: right; }
+        .bench-val { font-size: 11px; font-weight: 600; width: 70px; }
+
+        /* ═══ RING GAUGE ═══ */
+        .ring-container {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .mini-ring {
+            width: 48px; height: 48px;
+            position: relative;
+        }
+
+        .mini-ring svg {
+            width: 100%; height: 100%;
+            transform: rotate(-90deg);
+        }
+
+        .mini-ring-val {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        /* ═══ SCROLLBAR ═══ */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 2px; }
+
+        /* ═══ RESPONSIVE ═══ */
+        @media (max-width: 1200px) {
+            .main { grid-template-columns: 1fr; }
+            .panel-left, .panel-right { border: none; max-height: none; }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-grid"></div>
+    <div class="bg-glow blue"></div>
+    <div class="bg-glow purple"></div>
+
+    <!-- ═══ TOP BAR ═══ -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <div class="logo-mark">M</div>
+            <div class="logo-text">MEV<span>Protocol</span></div>
+            <span class="badge badge-version">v0.2.0</span>
+            <span class="badge badge-chain">ARBITRUM</span>
+        </div>
+        <div class="topbar-center">
+            <div class="status-pulse" id="statusPulse"></div>
+            <span class="status-text" id="statusText">Connecting...</span>
+        </div>
+        <div class="topbar-right">
+            <div class="topbar-stat">
+                <span>UPTIME</span>
+                <span class="val" id="uptime">--</span>
+            </div>
+            <div class="topbar-stat">
+                <span>BLOCKS</span>
+                <span class="val" id="blocksTotal">0</span>
+            </div>
+            <div class="topbar-stat">
+                <span>TX/s</span>
+                <span class="val" id="txRate">0</span>
+            </div>
+            <div class="topbar-stat">
+                <span>UTC</span>
+                <span class="val" id="clock">--:--:--</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ MAIN 3-COLUMN ═══ -->
+    <div class="main">
+
+        <!-- LEFT PANEL -->
+        <div class="panel-left">
+            <div class="panel-title">Network</div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--blue)"></span> Block Height</div>
+                <div class="tile-value" style="color:var(--blue)" id="blockHeight">--</div>
+                <div class="tile-sub" id="blockSub">waiting for blocks</div>
+            </div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--orange)"></span> Propagation</div>
+                <div class="tile-value" style="color:var(--orange)" id="propagation">--</div>
+                <div class="tile-sub">ms (block → node)</div>
+            </div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--green)"></span> RPC Endpoints</div>
+                <div class="tile-value" style="color:var(--green)" id="healthyRpc">--</div>
+                <div class="tile-sub" id="rpcLatency">--</div>
+            </div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--cyan)"></span> Gas Utilization</div>
+                <div class="ring-container">
+                    <div class="mini-ring">
+                        <svg viewBox="0 0 36 36">
+                            <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
+                            <circle class="gauge-fill" id="gasUtilRing" cx="18" cy="18" r="15.5"
+                                stroke="var(--cyan)" stroke-dasharray="97.4" stroke-dashoffset="97.4" />
+                        </svg>
+                        <div class="mini-ring-val" id="gasUtilVal">0%</div>
+                    </div>
+                    <div>
+                        <div style="font-size:11px;color:var(--text-1)" id="gasUsed">--</div>
+                        <div style="font-size:10px;color:var(--text-2)">gas used / limit</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel-title" style="margin-top:8px">Mempool</div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--green)"></span> TX Received</div>
+                <div class="tile-value" id="txReceived">0</div>
+                <div class="tile-sub" id="txReceivedRate">0 tx/s</div>
+            </div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--cyan)"></span> TX Filtered</div>
+                <div class="tile-value" style="color:var(--cyan)" id="txFiltered">0</div>
+                <div class="tile-sub">passed selector match</div>
+            </div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--red)"></span> TX Dropped</div>
+                <div class="tile-value" style="color:var(--red)" id="txDropped">0</div>
+                <div class="tile-sub">buffer overflow</div>
+            </div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--purple)"></span> Buffer</div>
+                <div class="ring-container">
+                    <div class="mini-ring">
+                        <svg viewBox="0 0 36 36">
+                            <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
+                            <circle class="gauge-fill" id="bufferRing" cx="18" cy="18" r="15.5"
+                                stroke="var(--purple)" stroke-dasharray="97.4" stroke-dashoffset="97.4" />
+                        </svg>
+                        <div class="mini-ring-val" id="bufferVal">0%</div>
+                    </div>
+                    <div>
+                        <div style="font-size:11px;color:var(--text-1)">10,000 capacity</div>
+                        <div style="font-size:10px;color:var(--text-2)">pending tx buffer</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- CENTER -->
+        <div class="center">
+
+            <!-- Pipeline Flow -->
+            <div class="pipeline-flow">
+                <div class="flow-title">Transaction Processing Pipeline</div>
+                <div class="flow-stages">
+                    <div class="flow-stage">
+                        <div class="stage-icon" style="background:rgba(6,182,212,0.12);border:1px solid rgba(6,182,212,0.25);color:var(--cyan)">&#x1F4E1;</div>
+                        <div class="stage-name">Mempool</div>
+                        <div class="stage-stat" style="color:var(--cyan)" id="stageMempool">0</div>
+                        <div class="stage-rate" id="stageMempoolRate">0/s</div>
+                    </div>
+                    <div class="flow-arrow"><div class="flow-particle" style="animation-delay:0s"></div><div class="flow-particle" style="animation-delay:0.5s"></div></div>
+                    <div class="flow-stage">
+                        <div class="stage-icon" style="background:rgba(59,130,246,0.12);border:1px solid rgba(59,130,246,0.25);color:var(--blue)">&#x26A1;</div>
+                        <div class="stage-name">Classify</div>
+                        <div class="stage-stat" style="color:var(--blue)" id="stageClassify">0</div>
+                        <div class="stage-rate">40.7 ns/op</div>
+                    </div>
+                    <div class="flow-arrow"><div class="flow-particle" style="animation-delay:0.3s"></div><div class="flow-particle" style="animation-delay:0.8s"></div></div>
+                    <div class="flow-stage">
+                        <div class="stage-icon" style="background:rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.25);color:var(--green)">&#x1F3AF;</div>
+                        <div class="stage-name">Filter</div>
+                        <div class="stage-stat" style="color:var(--green)" id="stageFilter">0</div>
+                        <div class="stage-rate" id="stageFilterRate">pass rate --</div>
+                    </div>
+                    <div class="flow-arrow"><div class="flow-particle" style="animation-delay:0.6s"></div><div class="flow-particle" style="animation-delay:1.1s"></div></div>
+                    <div class="flow-stage">
+                        <div class="stage-icon" style="background:rgba(139,92,246,0.12);border:1px solid rgba(139,92,246,0.25);color:var(--purple)">&#x1F48E;</div>
+                        <div class="stage-name">Opportunity</div>
+                        <div class="stage-stat" style="color:var(--purple)" id="stageOpp">0</div>
+                        <div class="stage-rate">detected</div>
+                    </div>
+                    <div class="flow-arrow"><div class="flow-particle" style="animation-delay:0.9s"></div><div class="flow-particle" style="animation-delay:1.4s"></div></div>
+                    <div class="flow-stage">
+                        <div class="stage-icon" style="background:rgba(236,72,153,0.12);border:1px solid rgba(236,72,153,0.25);color:var(--pink)">&#x1F680;</div>
+                        <div class="stage-name">Relay</div>
+                        <div class="stage-stat" style="color:var(--pink)" id="stageRelay">0</div>
+                        <div class="stage-rate">submitted</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Classification Breakdown -->
+            <div class="flow-title" style="color:var(--text-2);width:100%;text-align:left;padding:0 4px">Classification Breakdown</div>
+            <div class="class-grid">
+                <div class="class-item v2">
+                    <div class="class-icon">&#x1F535;</div>
+                    <div class="class-name">Swap V2</div>
+                    <div class="class-count" style="color:var(--blue)" id="classV2">0</div>
+                    <div class="class-pct" id="classV2pct">0%</div>
+                </div>
+                <div class="class-item v3">
+                    <div class="class-icon">&#x1F7E2;</div>
+                    <div class="class-name">Swap V3</div>
+                    <div class="class-count" style="color:var(--green)" id="classV3">0</div>
+                    <div class="class-pct" id="classV3pct">0%</div>
+                </div>
+                <div class="class-item liq">
+                    <div class="class-icon">&#x1F534;</div>
+                    <div class="class-name">Liquidation</div>
+                    <div class="class-count" style="color:var(--red)" id="classLiq">0</div>
+                    <div class="class-pct" id="classLiqpct">0%</div>
+                </div>
+                <div class="class-item flash">
+                    <div class="class-icon">&#x1F7E3;</div>
+                    <div class="class-name">Flash Loan</div>
+                    <div class="class-count" style="color:var(--purple)" id="classFlash">0</div>
+                    <div class="class-pct" id="classFlashpct">0%</div>
+                </div>
+                <div class="class-item transfer">
+                    <div class="class-icon">&#x1F7E0;</div>
+                    <div class="class-name">Transfer</div>
+                    <div class="class-count" style="color:var(--orange)" id="classTransfer">0</div>
+                    <div class="class-pct" id="classTransferpct">0%</div>
+                </div>
+                <div class="class-item unknown">
+                    <div class="class-icon">&#x26AA;</div>
+                    <div class="class-name">Unknown</div>
+                    <div class="class-count" style="color:var(--text-2)" id="classUnknown">0</div>
+                    <div class="class-pct" id="classUnknownpct">0%</div>
+                </div>
+            </div>
+
+            <!-- Gas Gauges -->
+            <div class="gas-section">
+                <div class="gas-header">
+                    <div class="flow-title" style="margin:0;text-align:left">EIP-1559 Gas Oracle</div>
+                    <span style="font-size:10px;color:var(--text-2)">250ms refresh</span>
+                </div>
+                <div class="gas-meters">
+                    <div class="gas-meter">
+                        <div class="gauge-ring">
+                            <svg viewBox="0 0 36 36">
+                                <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
+                                <circle class="gauge-fill" id="gasBaseRing" cx="18" cy="18" r="15.5"
+                                    stroke="var(--orange)" stroke-dasharray="97.4" stroke-dashoffset="97.4" />
+                            </svg>
+                            <div class="gauge-center">
+                                <div class="gauge-val" style="color:var(--orange)" id="gasBase">--</div>
+                                <div class="gauge-unit">gwei</div>
+                            </div>
+                        </div>
+                        <div class="gas-label">Base Fee</div>
+                    </div>
+                    <div class="gas-meter">
+                        <div class="gauge-ring">
+                            <svg viewBox="0 0 36 36">
+                                <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
+                                <circle class="gauge-fill" id="gasPriorityRing" cx="18" cy="18" r="15.5"
+                                    stroke="var(--blue)" stroke-dasharray="97.4" stroke-dashoffset="97.4" />
+                            </svg>
+                            <div class="gauge-center">
+                                <div class="gauge-val" style="color:var(--blue)" id="gasPriority">--</div>
+                                <div class="gauge-unit">gwei</div>
+                            </div>
+                        </div>
+                        <div class="gas-label">Priority</div>
+                    </div>
+                    <div class="gas-meter">
+                        <div class="gauge-ring">
+                            <svg viewBox="0 0 36 36">
+                                <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
+                                <circle class="gauge-fill" id="gasPredRing" cx="18" cy="18" r="15.5"
+                                    stroke="var(--purple)" stroke-dasharray="97.4" stroke-dashoffset="97.4" />
+                            </svg>
+                            <div class="gauge-center">
+                                <div class="gauge-val" style="color:var(--purple)" id="gasPredicted">--</div>
+                                <div class="gauge-unit">gwei</div>
+                            </div>
+                        </div>
+                        <div class="gas-label">Predicted</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RIGHT PANEL -->
+        <div class="panel-right">
+            <div class="panel-title">Live Feed</div>
+
+            <div class="feed">
+                <div class="feed-header">
+                    <span style="font-size:10px;color:var(--text-2);font-weight:600;text-transform:uppercase;letter-spacing:1px">Events</span>
+                    <span style="font-size:10px;color:var(--text-2)" id="feedCount">0 events</span>
+                </div>
+                <div class="feed-body" id="feedBody"></div>
+            </div>
+
+            <div class="panel-title" style="margin-top:8px">Performance</div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--green)"></span> TX Classification</div>
+                <div class="bench-row">
+                    <span class="bench-label">Latency</span>
+                    <div class="bench-bar-track">
+                        <div class="bench-bar-fill" style="width:4%;background:var(--green)"></div>
+                    </div>
+                    <span class="bench-val" style="color:var(--green)">40.7ns</span>
+                </div>
+                <div style="font-size:10px;color:var(--text-2)">0 alloc &#x2014; 24.5M tx/sec theoretical</div>
+            </div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--blue)"></span> Base Fee Prediction</div>
+                <div class="bench-row">
+                    <span class="bench-label">Latency</span>
+                    <div class="bench-bar-track">
+                        <div class="bench-bar-fill" style="width:42%;background:var(--blue)"></div>
+                    </div>
+                    <span class="bench-val" style="color:var(--blue)">425ns</span>
+                </div>
+                <div style="font-size:10px;color:var(--text-2)">6 allocs &#x2014; 2.3M/sec throughput</div>
+            </div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--orange)"></span> Pipeline Workers</div>
+                <div class="tile-value" style="color:var(--orange);font-size:32px" id="workers">4</div>
+                <div class="tile-sub">concurrent goroutine classifiers</div>
+            </div>
+
+            <div class="tile">
+                <div class="tile-label"><span class="tile-dot" style="background:var(--red)"></span> Errors</div>
+                <div style="display:flex;justify-content:space-between;margin-top:6px">
+                    <div>
+                        <div style="font-size:10px;color:var(--text-2)">Sub Errors</div>
+                        <div style="font-size:18px;font-weight:700;color:var(--red)" id="subErrors">0</div>
+                    </div>
+                    <div>
+                        <div style="font-size:10px;color:var(--text-2)">RPC Errors</div>
+                        <div style="font-size:18px;font-weight:700;color:var(--red)" id="rpcErrors">0</div>
+                    </div>
+                    <div>
+                        <div style="font-size:10px;color:var(--text-2)">Dropped</div>
+                        <div style="font-size:18px;font-weight:700;color:var(--red)" id="errDropped">0</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const METRICS_URL = 'http://localhost:9090/metrics';
+        const POLL_MS = 2000;
+        let connected = false;
+        let startTime = Date.now();
+        let feedEvents = [];
+        let prevMetrics = {};
+        let prevBlock = 0;
+        let prevReceived = 0;
+
+        function parsePrometheus(text) {
+            const m = {};
+            for (const line of text.split('\n')) {
+                if (line.startsWith('#') || !line.trim()) continue;
+                const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(.+)$/);
+                if (match) {
+                    const key = match[1] + (match[2] || '');
+                    m[key] = parseFloat(match[3]);
+                }
+            }
+            return m;
+        }
+
+        function g(m, name, labels) {
+            return m[labels ? name + '{' + labels + '}' : name] || 0;
+        }
+
+        function sumPrefix(m, prefix) {
+            let t = 0;
+            for (const [k, v] of Object.entries(m)) if (k.startsWith(prefix)) t += v;
+            return t;
+        }
+
+        function fmt(n) {
+            if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+            return Math.round(n).toLocaleString();
+        }
+
+        function fmtDec(n, d) { return n > 0 ? n.toFixed(d) : '--'; }
+
+        function setRing(id, pct) {
+            const offset = 97.4 - (97.4 * Math.min(Math.max(pct, 0), 1));
+            document.getElementById(id).setAttribute('stroke-dashoffset', offset);
+        }
+
+        function addFeed(type, msg) {
+            const now = new Date().toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+            feedEvents.unshift({time: now, type, msg});
+            if (feedEvents.length > 200) feedEvents.length = 200;
+            renderFeed();
+        }
+
+        function renderFeed() {
+            const body = document.getElementById('feedBody');
+            body.innerHTML = feedEvents.slice(0, 50).map(e =>
+                '<div class="feed-row">' +
+                    '<span class="feed-time">' + e.time + '</span>' +
+                    '<span class="feed-tag ' + e.type + '">' + e.type.toUpperCase() + '</span>' +
+                    '<span class="feed-msg">' + e.msg + '</span>' +
+                '</div>'
+            ).join('');
+            document.getElementById('feedCount').textContent = feedEvents.length + ' events';
+        }
+
+        function formatUptime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            if (h > 0) return h + 'h ' + m + 'm ' + s + 's';
+            if (m > 0) return m + 'm ' + s + 's';
+            return s + 's';
+        }
+
+        function updateClock() {
+            document.getElementById('clock').textContent = new Date().toLocaleTimeString('en-US', {hour12:false});
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        async function poll() {
+            try {
+                const resp = await fetch(METRICS_URL);
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const text = await resp.text();
+                const m = parsePrometheus(text);
+
+                if (!connected) {
+                    connected = true;
+                    startTime = Date.now();
+                    addFeed('block', 'Connected to MEV node');
+                }
+
+                document.getElementById('statusPulse').className = 'status-pulse live';
+                document.getElementById('statusText').textContent = 'Live';
+
+                // Uptime
+                const uptimeSec = g(m, 'mev_node_uptime_seconds_total');
+                document.getElementById('uptime').textContent = uptimeSec > 0 ? formatUptime(Math.round(uptimeSec)) : formatUptime(Math.floor((Date.now() - startTime) / 1000));
+
+                // Block
+                const blockNum = g(m, 'mev_block_latest_number');
+                document.getElementById('blockHeight').textContent = blockNum > 0 ? '#' + Math.round(blockNum).toLocaleString() : '--';
+                document.getElementById('blockSub').textContent = blockNum > 0 ? 'Arbitrum One' : 'waiting for blocks';
+
+                if (blockNum > prevBlock && prevBlock > 0) {
+                    addFeed('block', 'Block #' + Math.round(blockNum).toLocaleString() + ' (+' + Math.round(blockNum - prevBlock) + ')');
+                }
+                prevBlock = blockNum;
+
+                // Blocks total
+                document.getElementById('blocksTotal').textContent = fmt(g(m, 'mev_block_processed_total'));
+
+                // Propagation
+                const propMs = g(m, 'mev_block_propagation_ms');
+                document.getElementById('propagation').textContent = propMs > 0 ? Math.round(propMs).toLocaleString() : '--';
+
+                // RPC
+                const healthy = g(m, 'mev_rpc_healthy_endpoints');
+                document.getElementById('healthyRpc').textContent = Math.round(healthy) + ' / 1';
+                document.getElementById('rpcLatency').textContent = healthy > 0 ? 'connected' : 'disconnected';
+
+                // Gas utilization
+                const gasRatio = g(m, 'mev_block_gas_utilization_ratio');
+                document.getElementById('gasUtilVal').textContent = (gasRatio * 100).toFixed(1) + '%';
+                setRing('gasUtilRing', gasRatio);
+
+                // Mempool
+                const received = g(m, 'mev_mempool_tx_received_total');
+                const filtered = g(m, 'mev_mempool_tx_filtered_total');
+                const dropped = g(m, 'mev_mempool_tx_dropped_total');
+                const buffer = g(m, 'mev_mempool_buffer_usage');
+                const txRateSec = g(m, 'mev_mempool_tx_rate_per_sec');
+
+                document.getElementById('txReceived').textContent = fmt(received);
+                document.getElementById('txReceivedRate').textContent = txRateSec.toFixed(0) + ' tx/s';
+                document.getElementById('txFiltered').textContent = fmt(filtered);
+                document.getElementById('txDropped').textContent = fmt(dropped);
+                document.getElementById('bufferVal').textContent = (buffer * 100).toFixed(0) + '%';
+                setRing('bufferRing', buffer);
+                document.getElementById('txRate').textContent = txRateSec.toFixed(0);
+
+                if (received > prevReceived + 100) {
+                    addFeed('tx', fmt(received) + ' transactions received (+' + fmt(received - prevReceived) + ')');
+                    prevReceived = received;
+                }
+
+                // Pipeline
+                const classified = g(m, 'mev_pipeline_tx_processed_total', 'stage="classify"');
+                const filteredPipe = g(m, 'mev_pipeline_filtered_total');
+                const opps = sumPrefix(m, 'mev_pipeline_opportunities_found_total');
+                const relaySubmitted = sumPrefix(m, 'mev_relay_bundles_submitted_total');
+
+                document.getElementById('stageMempool').textContent = fmt(received);
+                document.getElementById('stageMempoolRate').textContent = txRateSec.toFixed(0) + '/s';
+                document.getElementById('stageClassify').textContent = fmt(classified);
+                document.getElementById('stageFilter').textContent = fmt(filteredPipe);
+                if (classified > 0) {
+                    document.getElementById('stageFilterRate').textContent = ((filteredPipe / classified) * 100).toFixed(1) + '% pass';
+                }
+                document.getElementById('stageOpp').textContent = fmt(opps);
+                document.getElementById('stageRelay').textContent = fmt(relaySubmitted);
+
+                // Classification
+                var classTypes = {
+                    V2: g(m, 'mev_pipeline_opportunities_found_total', 'type="swap_v2"'),
+                    V3: g(m, 'mev_pipeline_opportunities_found_total', 'type="swap_v3"'),
+                    Liq: g(m, 'mev_pipeline_opportunities_found_total', 'type="liquidation"'),
+                    Flash: g(m, 'mev_pipeline_opportunities_found_total', 'type="flash_loan"'),
+                    Transfer: g(m, 'mev_pipeline_opportunities_found_total', 'type="transfer"'),
+                    Unknown: 0
+                };
+                var totalClass = Object.values(classTypes).reduce(function(a,b){return a+b;}, 0) || 1;
+
+                for (var key in classTypes) {
+                    var val = classTypes[key];
+                    document.getElementById('class' + key).textContent = fmt(val);
+                    document.getElementById('class' + key + 'pct').textContent = ((val / totalClass) * 100).toFixed(1) + '%';
+                }
+
+                if (opps > (prevMetrics.opps || 0)) {
+                    addFeed('opp', (opps - (prevMetrics.opps || 0)) + ' new MEV opportunities detected');
+                }
+                prevMetrics.opps = opps;
+
+                // Gas oracle
+                var gasBase = g(m, 'mev_gas_base_fee_gwei');
+                var gasPriority = g(m, 'mev_gas_priority_fee_gwei');
+                var gasPredicted = g(m, 'mev_gas_predicted_base_fee_gwei');
+
+                document.getElementById('gasBase').textContent = fmtDec(gasBase, 4);
+                document.getElementById('gasPriority').textContent = fmtDec(gasPriority, 4);
+                document.getElementById('gasPredicted').textContent = fmtDec(gasPredicted, 4);
+
+                setRing('gasBaseRing', Math.min(gasBase / 0.1, 1));
+                setRing('gasPriorityRing', Math.min(gasPriority / 5, 1));
+                setRing('gasPredRing', Math.min(gasPredicted / 0.1, 1));
+
+                if (gasBase > 0 && Math.abs(gasBase - (prevMetrics.gasBase || 0)) > 0.005) {
+                    addFeed('gas', 'Base fee: ' + gasBase.toFixed(4) + ' Gwei (' + (gasBase > (prevMetrics.gasBase || 0) ? '\u2191' : '\u2193') + ')');
+                    prevMetrics.gasBase = gasBase;
+                }
+
+                // Errors
+                document.getElementById('subErrors').textContent = fmt(g(m, 'mev_mempool_subscription_errors_total'));
+                document.getElementById('errDropped').textContent = fmt(dropped);
+
+                var rpcErrCount = 0;
+                for (var k in m) {
+                    if (k.indexOf('mev_rpc_requests_total') !== -1 && k.indexOf('status="error"') !== -1) rpcErrCount += m[k];
+                }
+                document.getElementById('rpcErrors').textContent = fmt(rpcErrCount);
+
+            } catch (e) {
+                if (connected) {
+                    document.getElementById('statusPulse').className = 'status-pulse error';
+                    document.getElementById('statusText').textContent = 'Disconnected';
+                    addFeed('warn', 'Lost connection to node');
+                    connected = false;
+                } else {
+                    document.getElementById('statusText').textContent = 'Node offline';
+                }
+            }
+        }
+
+        poll();
+        setInterval(poll, POLL_MS);
+    </script>
+</body>
+</html>

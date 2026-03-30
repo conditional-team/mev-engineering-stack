@@ -172,10 +172,62 @@ var (
 	})
 )
 
+// Node metrics
+var (
+	NodeUptimeSeconds = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "mev",
+		Subsystem: "node",
+		Name:      "uptime_seconds_total",
+		Help:      "Total node uptime in seconds",
+	})
+
+	NodeStartTime = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "mev",
+		Subsystem: "node",
+		Name:      "start_time_seconds",
+		Help:      "Unix timestamp when the node started",
+	})
+
+	BlockGasRatio = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "mev",
+		Subsystem: "block",
+		Name:      "gas_utilization_ratio",
+		Help:      "Gas utilization ratio (gasUsed/gasLimit) of latest block",
+	})
+
+	BlockPropagationMs = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "mev",
+		Subsystem: "block",
+		Name:      "propagation_ms",
+		Help:      "Latest block propagation delay in milliseconds",
+	})
+
+	MempoolTxRate = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "mev",
+		Subsystem: "mempool",
+		Name:      "tx_rate_per_sec",
+		Help:      "Transactions received per second (rolling)",
+	})
+
+	PipelineFilteredTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "mev",
+		Subsystem: "pipeline",
+		Name:      "filtered_total",
+		Help:      "Total transactions that passed pipeline filter",
+	})
+
+	BlocksProcessedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "mev",
+		Subsystem: "block",
+		Name:      "processed_total",
+		Help:      "Total blocks processed since start",
+	})
+)
+
 // ServeMetrics starts the Prometheus metrics HTTP server
 func ServeMetrics(addr string) {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", corsMiddleware(promhttp.Handler()))
 
 	server := &http.Server{
 		Addr:    addr,
@@ -188,4 +240,17 @@ func ServeMetrics(addr string) {
 			log.Error().Err(err).Msg("Metrics server error")
 		}
 	}()
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

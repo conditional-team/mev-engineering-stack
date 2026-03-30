@@ -223,6 +223,11 @@ func (m *Monitor) processLoop(ctx context.Context) {
 			return
 
 		case <-ticker.C:
+			// Update buffer usage metric
+			usage := float64(len(m.txChan)) / float64(cap(m.txChan))
+			metrics.MempoolBufferUsage.Set(usage)
+			metrics.MempoolTxRate.Set(float64(count))
+
 			if count > 0 {
 				log.Info().Uint64("txs", count).Msg("Transactions processed")
 				count = 0

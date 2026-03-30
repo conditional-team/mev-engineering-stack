@@ -229,6 +229,8 @@ func (w *Watcher) handleHeader(ethHeader *ethtypes.Header) {
 
 	// Record metrics
 	metrics.BlockLatestNumber.Set(float64(header.Number))
+	metrics.BlocksProcessedTotal.Inc()
+	metrics.BlockGasRatio.Set(float64(header.GasUsed) / float64(header.GasLimit))
 
 	if header.BaseFee != nil {
 		baseFeeGwei := new(big.Float).Quo(
@@ -242,6 +244,7 @@ func (w *Watcher) handleHeader(ethHeader *ethtypes.Header) {
 	blockTime := time.Unix(int64(header.Timestamp), 0)
 	propagationDelay := observedAt.Sub(blockTime).Seconds()
 	metrics.BlockProcessingLatency.Observe(propagationDelay)
+	metrics.BlockPropagationMs.Set(propagationDelay * 1000)
 
 	log.Info().
 		Uint64("number", header.Number).
