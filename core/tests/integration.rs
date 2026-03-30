@@ -51,6 +51,8 @@ async fn arbitrage_opportunity_simulates_with_gas() {
         gas_estimate: 250_000,
         deadline: 0,
         path: vec![DexType::UniswapV2, DexType::UniswapV3],
+        pool_addresses: vec![[0xAA; 20], [0xBB; 20]],
+        pool_fees: vec![3000, 500],
         target_tx: None,
     };
 
@@ -73,6 +75,8 @@ async fn liquidation_opportunity_simulates() {
         gas_estimate: 500_000,
         deadline: 0,
         path: vec![],
+        pool_addresses: vec![],
+        pool_fees: vec![],
         target_tx: None,
     };
 
@@ -97,6 +101,8 @@ async fn arbitrage_builds_valid_bundle() {
         gas_estimate: 250_000,
         deadline: 100,
         path: vec![DexType::UniswapV2, DexType::UniswapV3],
+        pool_addresses: vec![[0xAA; 20], [0xBB; 20]],
+        pool_fees: vec![3000, 500],
         target_tx: None,
     };
 
@@ -129,6 +135,8 @@ async fn liquidation_builds_valid_bundle() {
         gas_estimate: 500_000,
         deadline: 200,
         path: vec![],
+        pool_addresses: vec![],
+        pool_fees: vec![],
         target_tx: None,
     };
 
@@ -155,6 +163,8 @@ async fn backrun_builds_valid_bundle() {
         gas_estimate: 300_000,
         deadline: 50,
         path: vec![DexType::UniswapV2],
+        pool_addresses: vec![[0xAA; 20]],
+        pool_fees: vec![3000],
         target_tx: Some([0xAA; 32]),
     };
 
@@ -179,6 +189,8 @@ async fn full_pipeline_arbitrage_end_to_end() {
         gas_estimate: 250_000,
         deadline: 0,
         path: vec![DexType::UniswapV2, DexType::UniswapV3],
+        pool_addresses: vec![[0xAA; 20], [0xBB; 20]],
+        pool_fees: vec![3000, 500],
         target_tx: None,
     };
 
@@ -214,6 +226,8 @@ async fn simulator_tracks_count_across_calls() {
         gas_estimate: 250_000,
         deadline: 0,
         path: vec![DexType::UniswapV2, DexType::UniswapV3],
+        pool_addresses: vec![[0xAA; 20], [0xBB; 20]],
+        pool_fees: vec![3000, 500],
         target_tx: None,
     };
 
@@ -232,13 +246,13 @@ async fn builder_handles_all_opportunity_types() {
     let mut builder = mev_core::builder::BundleBuilder::new(config);
     builder.set_contract("0x0000000000000000000000000000000000000001".to_string());
 
-    let types = vec![
-        (OpportunityType::Arbitrage, vec![DexType::UniswapV2, DexType::UniswapV3]),
-        (OpportunityType::Backrun, vec![DexType::SushiSwap]),
-        (OpportunityType::Liquidation, vec![]),
+    let types: Vec<(OpportunityType, Vec<DexType>, Vec<[u8; 20]>, Vec<u32>)> = vec![
+        (OpportunityType::Arbitrage, vec![DexType::UniswapV2, DexType::UniswapV3], vec![[0xAA; 20], [0xBB; 20]], vec![3000, 500]),
+        (OpportunityType::Backrun, vec![DexType::SushiSwap], vec![[0xCC; 20]], vec![3000]),
+        (OpportunityType::Liquidation, vec![], vec![], vec![]),
     ];
 
-    for (opp_type, path) in types {
+    for (opp_type, path, pool_addresses, pool_fees) in types {
         let opp = Opportunity {
             opportunity_type: opp_type,
             token_in: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
@@ -248,6 +262,8 @@ async fn builder_handles_all_opportunity_types() {
             gas_estimate: 250_000,
             deadline: 100,
             path,
+            pool_addresses,
+            pool_fees,
             target_tx: None,
         };
 

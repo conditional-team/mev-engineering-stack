@@ -95,7 +95,7 @@ impl BundleBuilder {
         opportunity: &Opportunity,
         contract: &str,
     ) -> anyhow::Result<Vec<BundleTransaction>> {
-        let swap_path = self.encode_swap_path(&opportunity.path)?;
+        let swap_path = self.encode_swap_path(opportunity)?;
 
         let calldata = encode_arbitrage_call(
             &opportunity.token_in,
@@ -121,7 +121,7 @@ impl BundleBuilder {
         opportunity: &Opportunity,
         contract: &str,
     ) -> anyhow::Result<Vec<BundleTransaction>> {
-        let swap_path = self.encode_swap_path(&opportunity.path)?;
+        let swap_path = self.encode_swap_path(opportunity)?;
 
         let calldata = encode_backrun_call(
             &opportunity.token_in,
@@ -168,21 +168,44 @@ impl BundleBuilder {
     /// Encode the multi-hop swap path for the executor contract
     ///
     /// Wire format per hop: [dex_type:1][pool_address:20][fee:3]
-    fn encode_swap_path(&self, path: &[DexType]) -> anyhow::Result<Vec<u8>> {
+    fn encode_swap_path(&self, opportunity: &Opportunity) -> anyhow::Result<Vec<u8>> {
+        let path = &opportunity.path;
+        let pool_addresses = &opportunity.pool_addresses;
+        let pool_fees = &opportunity.pool_fees;
+
         let mut data = Vec::with_capacity(path.len() * 24);
 
         for (i, dex) in path.iter().enumerate() {
-            let (dex_byte, fee_bytes) = match dex {
-                DexType::UniswapV2  => (DEX_UNISWAP_V2, [0x00, 0x0B, 0xB8]),  // 3000 = 0x0BB8
-                DexType::UniswapV3  => (DEX_UNISWAP_V3, [0x00, 0x01, 0xF4]),  // 500  = 0x01F4
-                DexType::SushiSwap  => (DEX_SUSHISWAP,  [0x00, 0x0B, 0xB8]),
-                DexType::Curve      => (DEX_CURVE,       [0x00, 0x00, 0x04]),  // pool index
-                DexType::Balancer   => (DEX_BALANCER,    [0x00, 0x00, 0x00]),  // pool ID in data
+            let dex_byte = match dex {
+                DexType::UniswapV2  => DEX_UNISWAP_V2,
+                DexType::UniswapV3  => DEX_UNISWAP_V3,
+                DexType::SushiSwap  => DEX_SUSHISWAP,
+                DexType::Curve      => DEX_CURVE,
+                DexType::Balancer   => DEX_BALANCER,
             };
 
+            // Use real pool address if available, otherwise zero (will fail on-chain — must be filled)
+            let pool_addr = pool_addresses.get(i).copied().unwrap_or([0u8; 20]);
+            if pool_addr == [0u8; 20] {
+                tracing::warn!(hop = i, dex = ?dex, "Pool address not resolved — bundle may fail on-chain");
+            }
+
+            // Use per-hop fee if available, otherwise derive from DEX type
+            let fee = pool_fees.get(i).copied().unwrap_or(match dex {
+                DexType::UniswapV2  => 3000,
+                DexType::UniswapV3  => 500,
+                DexType::SushiSwap  => 3000,
+                DexType::Curve      => 4,
+                DexType::Balancer   => 0,
+            });
+            let fee_bytes = [
+                ((fee >> 16) & 0xFF) as u8,
+                ((fee >> 8) & 0xFF) as u8,
+                (fee & 0xFF) as u8,
+            ];
+
             data.push(dex_byte);
-            // Pool address placeholder — real address comes from pool cache
-            data.extend_from_slice(&[0u8; 20]);
+            data.extend_from_slice(&pool_addr);
             data.extend_from_slice(&fee_bytes);
         }
 
@@ -353,6 +376,8 @@ mod tests {
             gas_estimate: 250_000,
             deadline: 100,
             path: vec![DexType::UniswapV2, DexType::UniswapV3],
+            pool_addresses: vec![[0xAA; 20], [0xBB; 20]],
+            pool_fees: vec![3000, 500],
             target_tx: None,
         };
 
@@ -367,12 +392,208 @@ mod tests {
         let config = Arc::new(Config::default());
         let builder = BundleBuilder::new(config);
 
-        let path = vec![DexType::UniswapV2, DexType::UniswapV3];
-        let encoded = builder.encode_swap_path(&path).unwrap();
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Arbitrage,
+            token_in: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
+            token_out: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            amount_in: 1_000_000_000_000_000_000,
+            expected_profit: 10_000_000_000_000_000,
+            gas_estimate: 250_000,
+            deadline: 100,
+            path: vec![DexType::UniswapV2, DexType::UniswapV3],
+            pool_addresses: vec![[0xAA; 20], [0xBB; 20]],
+            pool_fees: vec![3000, 500],
+            target_tx: None,
+        };
+        let encoded = builder.encode_swap_path(&opp).unwrap();
 
         // 2 hops × 24 bytes each = 48
         assert_eq!(encoded.len(), 48);
         assert_eq!(encoded[0], DEX_UNISWAP_V2);
+        // Pool address should be real, not zeros
+        assert_eq!(encoded[1..21], [0xAA; 20]);
         assert_eq!(encoded[24], DEX_UNISWAP_V3);
+        assert_eq!(encoded[25..45], [0xBB; 20]);
+    }
+
+    #[tokio::test]
+    async fn test_build_backrun_bundle() {
+        let config = Arc::new(Config::default());
+        let mut builder = BundleBuilder::new(config);
+        builder.set_contract("0x1234567890123456789012345678901234567890".to_string());
+
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Backrun,
+            token_in: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
+            token_out: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            amount_in: 2_000_000_000_000_000_000,
+            expected_profit: 20_000_000_000_000_000,
+            gas_estimate: 200_000,
+            deadline: 50,
+            path: vec![DexType::UniswapV3],
+            pool_addresses: vec![[0xCC; 20]],
+            pool_fees: vec![500],
+            target_tx: None,
+        };
+
+        let bundle = builder.build(&opp).await.unwrap();
+        assert_eq!(bundle.transactions.len(), 1);
+        // Backrun should use EXECUTE_BACKRUN selector
+        assert_eq!(&bundle.transactions[0].data[0..4], &selectors::EXECUTE_BACKRUN);
+        // Priority fee is 2 gwei for backrun
+        assert_eq!(bundle.transactions[0].max_priority_fee_per_gas, Some(2_000_000_000));
+    }
+
+    #[tokio::test]
+    async fn test_build_liquidation_bundle() {
+        let config = Arc::new(Config::default());
+        let mut builder = BundleBuilder::new(config);
+        builder.set_contract("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string());
+
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Liquidation,
+            token_in: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            token_out: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
+            amount_in: 50_000_000_000_000_000_000,
+            expected_profit: 5_000_000_000_000_000_000,
+            gas_estimate: 450_000,
+            deadline: 0,
+            path: vec![],
+            pool_addresses: vec![],
+            pool_fees: vec![],
+            target_tx: None,
+        };
+
+        let bundle = builder.build(&opp).await.unwrap();
+        assert_eq!(bundle.transactions.len(), 1);
+        assert_eq!(&bundle.transactions[0].data[0..4], &selectors::EXECUTE_LIQUIDATION);
+        assert_eq!(bundle.transactions[0].gas_limit, 450_000);
+    }
+
+    #[tokio::test]
+    async fn test_build_without_contract_fails() {
+        let config = Arc::new(Config::default());
+        let builder = BundleBuilder::new(config);
+
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Arbitrage,
+            token_in: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
+            token_out: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            amount_in: 1_000_000_000_000_000_000,
+            expected_profit: 10_000_000_000_000_000,
+            gas_estimate: 250_000,
+            deadline: 100,
+            path: vec![DexType::UniswapV2],
+            pool_addresses: vec![[0xAA; 20]],
+            pool_fees: vec![3000],
+            target_tx: None,
+        };
+
+        let result = builder.build(&opp).await;
+        assert!(result.is_err(), "build without contract should fail");
+    }
+
+    #[tokio::test]
+    async fn test_build_count_increments() {
+        let config = Arc::new(Config::default());
+        let mut builder = BundleBuilder::new(config);
+        builder.set_contract("0x1234567890123456789012345678901234567890".to_string());
+
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Arbitrage,
+            token_in: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
+            token_out: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            amount_in: 1_000_000_000_000_000_000,
+            expected_profit: 10_000_000_000_000_000,
+            gas_estimate: 250_000,
+            deadline: 100,
+            path: vec![DexType::UniswapV2],
+            pool_addresses: vec![[0xAA; 20]],
+            pool_fees: vec![3000],
+            target_tx: None,
+        };
+
+        assert_eq!(builder.count().await, 0);
+        builder.build(&opp).await.unwrap();
+        assert_eq!(builder.count().await, 1);
+        builder.build(&opp).await.unwrap();
+        assert_eq!(builder.count().await, 2);
+    }
+
+    #[test]
+    fn test_encode_swap_path_empty() {
+        let config = Arc::new(Config::default());
+        let builder = BundleBuilder::new(config);
+
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Arbitrage,
+            token_in: "0xdead".to_string(),
+            token_out: "0xbeef".to_string(),
+            amount_in: 0,
+            expected_profit: 0,
+            gas_estimate: 100_000,
+            deadline: 0,
+            path: vec![],
+            pool_addresses: vec![],
+            pool_fees: vec![],
+            target_tx: None,
+        };
+        let encoded = builder.encode_swap_path(&opp).unwrap();
+        assert_eq!(encoded.len(), 0, "empty path should produce empty bytes");
+    }
+
+    #[test]
+    fn test_encode_swap_path_missing_pool_uses_zeros() {
+        let config = Arc::new(Config::default());
+        let builder = BundleBuilder::new(config);
+
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Arbitrage,
+            token_in: "0xdead".to_string(),
+            token_out: "0xbeef".to_string(),
+            amount_in: 1_000_000_000_000_000_000,
+            expected_profit: 0,
+            gas_estimate: 250_000,
+            deadline: 0,
+            path: vec![DexType::UniswapV2],
+            pool_addresses: vec![], // no pool address provided
+            pool_fees: vec![],
+            target_tx: None,
+        };
+        let encoded = builder.encode_swap_path(&opp).unwrap();
+        assert_eq!(encoded.len(), 24);
+        assert_eq!(encoded[0], DEX_UNISWAP_V2);
+        // Pool address should be zeros (fallback)
+        assert_eq!(&encoded[1..21], &[0u8; 20]);
+    }
+
+    #[test]
+    fn test_abi_encode_address_no_prefix() {
+        let addr = "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"; // no 0x
+        let encoded = abi_encode_address(addr);
+        assert_eq!(&encoded[..12], &[0u8; 12]);
+        assert_eq!(encoded[12], 0xC0);
+    }
+
+    #[test]
+    fn test_abi_encode_address_empty() {
+        let encoded = abi_encode_address("");
+        assert_eq!(encoded, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_abi_encode_u256_zero() {
+        let encoded = abi_encode_u256(0);
+        assert_eq!(encoded, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_abi_encode_u256_max() {
+        let encoded = abi_encode_u256(u128::MAX);
+        assert_eq!(&encoded[..16], &[0u8; 16]);
+        assert_eq!(
+            u128::from_be_bytes(encoded[16..32].try_into().unwrap()),
+            u128::MAX
+        );
     }
 }

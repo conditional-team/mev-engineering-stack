@@ -85,6 +85,11 @@ pub struct Opportunity {
     pub deadline: u64,
     /// Multi-hop swap path (DEX sequence)
     pub path: Vec<DexType>,
+    /// Pool addresses for each hop in path (parallel to `path`)
+    /// Each entry is the on-chain pool contract address for that swap step.
+    pub pool_addresses: Vec<[u8; 20]>,
+    /// Fee tiers per hop in basis points (parallel to `path`)
+    pub pool_fees: Vec<u32>,
     /// Hash of the target tx to backrun (if applicable)
     pub target_tx: Option<[u8; 32]>,
 }
@@ -183,4 +188,116 @@ pub struct PoolState {
     pub reserve1: u128,
     /// Pool fee in hundredths of a basis point
     pub fee: u32,
+}
+
+// ─── Gas estimation ──────────────────────────────────────────────
+
+/// Base EVM transaction overhead (intrinsic gas).
+const BASE_TX_GAS: u64 = 21_000;
+/// Flash loan callback overhead (Balancer vault enter/exit).
+const FLASH_LOAN_GAS: u64 = 80_000;
+
+/// Per-hop gas cost by DEX type.
+fn dex_hop_gas(dex: &DexType) -> u64 {
+    match dex {
+        DexType::UniswapV2 | DexType::SushiSwap => 120_000,
+        DexType::UniswapV3 => 150_000,  // tick traversal
+        DexType::Curve => 200_000,       // multi-asset stable math
+        DexType::Balancer => 180_000,    // weighted pool calc
+    }
+}
+
+/// Estimate gas for an opportunity based on path complexity.
+///
+/// Formula: `BASE_TX + FLASH_LOAN + sum(dex_hop_gas(each_hop))`
+///
+/// This replaces the old hardcoded constants (250k arb, 180k backrun)
+/// and scales correctly for multi-hop paths.
+pub fn estimate_gas(opp_type: &OpportunityType, path: &[DexType]) -> u64 {
+    let hops: u64 = path.iter().map(dex_hop_gas).sum();
+    let flash = match opp_type {
+        OpportunityType::Arbitrage | OpportunityType::Liquidation => FLASH_LOAN_GAS,
+        OpportunityType::Backrun => 0, // backruns don't use flash loans
+    };
+    BASE_TX_GAS + flash + hops
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_estimate_gas_arb_two_v2_hops() {
+        // BASE_TX(21k) + FLASH_LOAN(80k) + 2 * UniV2(120k) = 341k
+        let gas = estimate_gas(
+            &OpportunityType::Arbitrage,
+            &[DexType::UniswapV2, DexType::UniswapV2],
+        );
+        assert_eq!(gas, 341_000);
+    }
+
+    #[test]
+    fn test_estimate_gas_arb_v2_v3_mixed() {
+        // 21k + 80k + 120k (V2) + 150k (V3) = 371k
+        let gas = estimate_gas(
+            &OpportunityType::Arbitrage,
+            &[DexType::UniswapV2, DexType::UniswapV3],
+        );
+        assert_eq!(gas, 371_000);
+    }
+
+    #[test]
+    fn test_estimate_gas_backrun_single_v3() {
+        // 21k + 0 (no flash) + 150k = 171k
+        let gas = estimate_gas(
+            &OpportunityType::Backrun,
+            &[DexType::UniswapV3],
+        );
+        assert_eq!(gas, 171_000);
+    }
+
+    #[test]
+    fn test_estimate_gas_liquidation_empty_path() {
+        // 21k + 80k + 0 = 101k (no swap hops, just flash + repay)
+        let gas = estimate_gas(&OpportunityType::Liquidation, &[]);
+        assert_eq!(gas, 101_000);
+    }
+
+    #[test]
+    fn test_estimate_gas_curve_hop() {
+        // 21k + 80k + 200k = 301k
+        let gas = estimate_gas(
+            &OpportunityType::Arbitrage,
+            &[DexType::Curve],
+        );
+        assert_eq!(gas, 301_000);
+    }
+
+    #[test]
+    fn test_estimate_gas_balancer_hop() {
+        // 21k + 80k + 180k = 281k
+        let gas = estimate_gas(
+            &OpportunityType::Arbitrage,
+            &[DexType::Balancer],
+        );
+        assert_eq!(gas, 281_000);
+    }
+
+    #[test]
+    fn test_estimate_gas_sushi_same_as_v2() {
+        let v2 = estimate_gas(&OpportunityType::Arbitrage, &[DexType::UniswapV2]);
+        let sushi = estimate_gas(&OpportunityType::Arbitrage, &[DexType::SushiSwap]);
+        assert_eq!(v2, sushi);
+    }
+
+    #[test]
+    fn test_estimate_gas_three_hop_arb() {
+        // Triangular arb: V2 → V3 → Sushi
+        // 21k + 80k + 120k + 150k + 120k = 491k
+        let gas = estimate_gas(
+            &OpportunityType::Arbitrage,
+            &[DexType::UniswapV2, DexType::UniswapV3, DexType::SushiSwap],
+        );
+        assert_eq!(gas, 491_000);
+    }
 }

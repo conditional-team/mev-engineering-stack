@@ -10,6 +10,7 @@ use ethers::{
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 // Generate contract bindings
 abigen!(
@@ -173,10 +174,14 @@ impl PoolManager {
     async fn fetch_v3_pool(&self, pool_addr: Address, fee: u32) -> Option<Pool> {
         let pool = UniswapV3Pool::new(pool_addr, self.provider.clone());
         
-        let token0 = pool.token_0().call().await.ok()?;
-        let token1 = pool.token_1().call().await.ok()?;
-        let liquidity = pool.liquidity().call().await.ok()?;
-        let slot0 = pool.slot_0().call().await.ok()?;
+        let token0 = pool.token_0().call().await
+            .map_err(|e| warn!(pool = ?pool_addr, error = %e, "Failed to fetch token0")).ok()?;
+        let token1 = pool.token_1().call().await
+            .map_err(|e| warn!(pool = ?pool_addr, error = %e, "Failed to fetch token1")).ok()?;
+        let liquidity = pool.liquidity().call().await
+            .map_err(|e| warn!(pool = ?pool_addr, error = %e, "Failed to fetch liquidity")).ok()?;
+        let slot0 = pool.slot_0().call().await
+            .map_err(|e| warn!(pool = ?pool_addr, error = %e, "Failed to fetch slot0")).ok()?;
         
         // Skip pools with no liquidity
         if liquidity == 0 {
@@ -229,14 +234,16 @@ impl PoolManager {
         pool_type: PoolType,
     ) -> Option<Pool> {
         let factory_contract = UniswapV2Factory::new(factory, self.provider.clone());
-        let pair_addr = factory_contract.get_pair(token0, token1).call().await.ok()?;
+        let pair_addr = factory_contract.get_pair(token0, token1).call().await
+            .map_err(|e| warn!(?token0, ?token1, error = %e, "Failed to fetch pair")).ok()?;
         
         if pair_addr == Address::zero() {
             return None;
         }
         
         let pair = UniswapV2Pair::new(pair_addr, self.provider.clone());
-        let reserves = pair.get_reserves().call().await.ok()?;
+        let reserves = pair.get_reserves().call().await
+            .map_err(|e| warn!(?pair_addr, error = %e, "Failed to fetch reserves")).ok()?;
         
         Some(Pool {
             address: pair_addr,
@@ -420,4 +427,127 @@ pub fn get_top_arbitrum_tokens() -> Vec<(&'static str, Address)> {
         ("Y2K", Address::from_str("0x65c936f008BC34fE819bce9Fa5afD9dc2d49977f").unwrap()),
         ("WINR", Address::from_str("0xD77B108d4f6cefaa0Cae9506A934e825BEccA46e").unwrap()),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ethers::types::{Address, U256};
+    use std::str::FromStr;
+
+    fn weth() -> Address {
+        Address::from_str("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1").unwrap()
+    }
+    fn usdc() -> Address {
+        Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831").unwrap()
+    }
+
+    fn v2_pool(r0: u128, r1: u128, fee_bps: u32) -> Pool {
+        Pool {
+            address: Address::from_low_u64_be(1),
+            token0: weth(),
+            token1: usdc(),
+            pool_type: PoolType::SushiSwap,
+            reserve0: U256::from(r0),
+            reserve1: U256::from(r1),
+            liquidity: U256::from(r0) + U256::from(r1),
+            fee_bps,
+        }
+    }
+
+    // ── get_amount_out ──
+
+    #[test]
+    fn test_get_amount_out_basic() {
+        // 5000 ETH (18 dec) / 10M USDC (6 dec), 0.3% fee
+        let pool = v2_pool(
+            5_000_000_000_000_000_000_000,
+            10_000_000_000_000,
+            30,
+        );
+        let amount_in = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
+        let out = pool.get_amount_out(amount_in, weth());
+        // ~1994 USDC (slightly less than 2000 due to fee + impact)
+        assert!(out > U256::from(1_990_000_000u64) && out < U256::from(2_000_000_000u64),
+            "Expected ~1994 USDC, got {}", out);
+    }
+
+    #[test]
+    fn test_get_amount_out_reverse_direction() {
+        let pool = v2_pool(
+            5_000_000_000_000_000_000_000,
+            10_000_000_000_000,
+            30,
+        );
+        let amount_in = U256::from(2_000_000_000u128); // 2000 USDC
+        let out = pool.get_amount_out(amount_in, usdc());
+        // Should get ~1 ETH back
+        assert!(out > U256::from(990_000_000_000_000_000u128),
+            "Expected ~1 ETH, got {}", out);
+    }
+
+    #[test]
+    fn test_get_amount_out_zero_reserves() {
+        let pool = v2_pool(0, 10_000_000_000_000, 30);
+        let out = pool.get_amount_out(U256::from(1000u64), weth());
+        assert_eq!(out, U256::zero());
+    }
+
+    #[test]
+    fn test_get_amount_out_zero_input() {
+        let pool = v2_pool(5_000_000_000_000_000_000_000, 10_000_000_000_000, 30);
+        let out = pool.get_amount_out(U256::zero(), weth());
+        assert_eq!(out, U256::zero());
+    }
+
+    #[test]
+    fn test_get_amount_out_high_fee() {
+        let pool = v2_pool(1_000_000, 1_000_000, 100); // 1% fee
+        let out_high = pool.get_amount_out(U256::from(10_000u64), weth());
+
+        let pool_low = v2_pool(1_000_000, 1_000_000, 10); // 0.1% fee
+        let out_low = pool_low.get_amount_out(U256::from(10_000u64), weth());
+
+        assert!(out_low > out_high, "lower fee should produce more output");
+    }
+
+    // ── get_price ──
+
+    #[test]
+    fn test_get_price_basic() {
+        let pool = v2_pool(1_000_000, 2_000_000, 30);
+        let price = pool.get_price();
+        assert!((price - 2.0).abs() < 0.001, "price should be ~2.0, got {}", price);
+    }
+
+    #[test]
+    fn test_get_price_zero_reserve() {
+        let pool = v2_pool(0, 1_000_000, 30);
+        assert_eq!(pool.get_price(), 0.0);
+    }
+
+    // ── Token list ──
+
+    #[test]
+    fn test_top_tokens_not_empty() {
+        let tokens = get_top_arbitrum_tokens();
+        assert!(tokens.len() >= 10);
+    }
+
+    #[test]
+    fn test_top_tokens_weth_first() {
+        let tokens = get_top_arbitrum_tokens();
+        assert_eq!(tokens[0].0, "WETH");
+        assert_eq!(tokens[0].1, weth());
+    }
+
+    #[test]
+    fn test_top_tokens_no_duplicate_addresses() {
+        let tokens = get_top_arbitrum_tokens();
+        let mut addrs: Vec<_> = tokens.iter().map(|(_, a)| *a).collect();
+        let before = addrs.len();
+        addrs.sort();
+        addrs.dedup();
+        assert_eq!(addrs.len(), before, "duplicate addresses in token list");
+    }
 }

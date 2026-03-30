@@ -98,17 +98,82 @@ HTML reports: `target/criterion/report/index.html`
 
 ## Tests
 
-33+ tests across all modules. Run with `cargo test`.
+**170 tests** — full coverage across all modules. Run with `cargo test`.
+
+```
+test result: ok. 137 passed (unit) + 10 passed (integration) + 23 passed (proptest) = 170 total
+```
+
+### Unit Tests (137)
 
 | Module | Tests | What's Verified |
 |--------|-------|-----------------|
-| `detector/arbitrage` | 5 | V2/V3 calldata parsing, profit calculation, ABI word decoding |
-| `simulator` | 3 | Constant-product math, zero-reserve edge case, simulation count |
-| `builder` | 5 | ABI encoding (address, u256), arbitrage/liquidation calldata, swap path |
-| `grpc/server` | 3 | u128 byte conversion (empty, 1 ETH, 32-byte overflow) |
-| `ffi` | 3 | FFI binding correctness, Rust fallback paths |
+| `detector/arbitrage` | 26 | V2/V3/V3-output calldata parsing, ABI word decoders (`u128`, `u64`, `u32`, `usize`), `decode_addr` (with/without `0x`, empty, invalid hex), `dex_from_fee` dispatch, `match_pool_to_swap` (forward/reversed/no-match), profit calculation (profitable, gas-exceeds, no-arb, single-price), truncated calldata rejection |
+| `detector/backrun` | 3 | Swap selector matching, price impact calculation, small-swap filtering |
+| `detector/liquidation` | 4 | Liquidatable position detection, healthy skip, close factor limits, stale pruning |
+| `detector/multi_threaded` | 1 | Parallel swap simulation |
+| `simulator` | 19 | Constant-product math (happy path, zero reserves, fee=100%, u128 overflow), pool cache (`load_pools`, `update_pool`, `get_pool`, `pool_reserves` cache hit/fallback/zero-addr), `ordered_pair` canonical ordering, `simulate` (arbitrage, backrun, liquidation), `simulate_bundle`, `success_rate`, `estimate_tx_gas`, simulation count tracking |
+| `builder` | 16 | ABI encoding (`address` with/without `0x`, empty, `u256` zero/max), arbitrage/backrun/liquidation bundle construction, swap path encoding (2-hop, empty, missing pool fallback), build without contract → error, build count increment |
+| `config` | 9 | Serde JSON roundtrip (full config + chain config), save/reload to disk, `from_env` fallback to defaults, Ethereum/Arbitrum chain presence, strategy defaults, performance non-zero |
+| `ffi/hot_path` | 24 | Keccak-256 known vectors (empty → `0xc5d246...`, "hello" → `0x1c8aff...`), function selectors (`transfer` = `0xa9059cbb`, `approve` = `0x095ea7b3`, V2 swap), `address_eq` (same/different/zero), RLP encoding (address length+prefix, u256 zero/small/large), `calc_price_impact_batch` (basic + zero-reserve), `OpportunityQueue` (new/push/pop/empty/FIFO order), `TxBuffer` (new/empty/write-read/512 cap), `SwapInfoFFI` default |
+| `ffi` | 3 | Keccak fallback, RLP encode single byte, RLP encode short string |
+| `grpc/server` | 3 | `bytes_to_u128` (empty, 1 ETH, 32-byte input) |
+| `mempool/ultra_ws` | 11 | Tx hash extraction (correct H256 value, missing result, truncated, invalid hex), swap classification (V2 `swapExactTokensForTokens`, V3 `exactInputSingle`, Universal Router `execute`), non-swap rejection (`approve`, `transfer`, empty input, short input) |
+| `arbitrum/pools` | 12 | `get_amount_out` (basic, reverse direction, zero reserves, zero input, high fee comparison), `get_price` (basic, zero reserve), token list (non-empty, WETH first, no duplicate addresses) |
+| `types` | 8 | `estimate_gas` across all `DexType` × `OpportunityType` combinations: 2×V2 arb (341k), V2+V3 mixed (371k), backrun V3 (171k), liquidation empty (101k), Curve (301k), Balancer (281k), Sushi==V2, 3-hop triangular (491k) |
+| `bench/latency` | 1 | Benchmark framework validation |
 | `lib` | 1 | Engine creation and state |
-| **proptest** | ∞ | Constant-product invariants, ABI encode/decode roundtrip, swap parsing boundaries |
+
+### Integration Tests (10)
+
+| Test | What's Verified |
+|------|-----------------|
+| `engine_starts_and_stops_cleanly` | Full lifecycle: start → stop without panic |
+| `engine_stats_start_at_zero` | Counter initialization |
+| `arbitrage_opportunity_simulates_with_gas` | Arbitrage → simulate → gas > 0 |
+| `arbitrage_builds_valid_bundle` | Arbitrage → build → valid tx with correct selector |
+| `backrun_builds_valid_bundle` | Backrun → build → correct priority fee |
+| `liquidation_builds_valid_bundle` | Liquidation → build → correct calldata layout |
+| `builder_handles_all_opportunity_types` | All 3 types produce valid bundles |
+| `full_pipeline_arbitrage_end_to_end` | detect → simulate → build (complete pipeline) |
+| `liquidation_opportunity_simulates` | Liquidation sim produces non-zero gas |
+| `simulator_tracks_count_across_calls` | Atomic counter consistency |
+
+### Property Tests (23 — proptest)
+
+| Property | Invariant |
+|----------|-----------|
+| `swap_zero_input_zero_output` | 0 in → 0 out (∀ reserves, fees) |
+| `swap_zero_reserves_zero_output` | Empty pool → 0 out |
+| `swap_output_bounded_by_reserve` | Output < reserve_out (conservation) |
+| `swap_monotonically_increasing` | More input → more output |
+| `swap_higher_fee_less_output` | Higher fee → less output |
+| `swap_preserves_k_invariant` | x·y ≥ k after swap (constant product) |
+| `swap_no_panic_on_overflow` | u128::MAX/2 inputs — no panic, returns 0 |
+| `swap_fee_100_percent_returns_zero` | 10000 bps → zero output |
+| `abi_u256_roundtrip` | Encode → decode identity |
+| `abi_u256_always_32_bytes` | Output is always exactly 32 bytes |
+| `abi_address_padding` | First 12 bytes always zero |
+| `gas_estimate_minimum` | Gas ≥ 21000 base |
+| `gas_estimate_capped_by_limit` | Gas ≤ limit |
+| `gas_increases_with_nonzero_bytes` | More non-zero calldata → more gas |
+| `keccak_deterministic` | Same input → same hash |
+| `keccak_collision_resistant` | Different input → different hash |
+| `keccak_output_always_32_bytes` | Output is always 32 bytes |
+| `unknown_selector_not_classified` | Random 4-byte selector → not a known swap |
+| `dashmap_insert_get_consistent` | Concurrent map consistency |
+| `crossbeam_channel_fifo` | Channel preserves ordering |
+| `estimate_gas_arb_includes_flash_loan` | Arbitrage gas ≥ 101k (includes flash overhead) |
+| `estimate_gas_backrun_no_flash_loan` | Backrun gas has no flash loan overhead |
+| `estimate_gas_monotonic_with_hops` | More hops → more gas |
+
+### Bugs Found & Fixed by Tests
+
+| Bug | Severity | Fix |
+|-----|----------|-----|
+| `is_likely_swap()` had `\|\| (selector[0] != 0x00)` — classified ALL non-zero-first-byte txs as swaps | **Critical** | Removed spurious OR condition; now only matches known swap selectors |
+| `constant_product_swap()` used unchecked arithmetic — silent u128 overflow on whale trades | **High** | Added `checked_mul`/`checked_add`; returns 0 on overflow instead of wrapping |
+| Proptest tested a LOCAL COPY of `constant_product_swap` with checked math, while production code had unchecked math | **High** | Proptest now imports `mev_core::simulator::constant_product_swap` directly |
 
 ## Dependencies
 

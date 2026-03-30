@@ -130,7 +130,7 @@ High-performance detection, simulation, and bundle construction. See [core/READM
 ```bash
 cd core
 cargo build --release     # opt-level=3, lto=fat, codegen-units=1
-cargo test                # 33 unit tests + property-based tests
+cargo test                # 170 tests (137 unit + 10 integration + 23 proptest)
 cargo bench               # 7 Criterion benchmark groups
 ```
 
@@ -272,11 +272,39 @@ Flags: `--key` (reuse signing key), `--rpc` (custom RPC), `--submit` (live submi
 
 | Layer | Tests | Framework | What's Tested |
 |-------|-------|-----------|---------------|
+| **Rust core** | **170 tests** (137 unit + 10 integration + 23 proptest) | `cargo test` + proptest + Criterion | See breakdown below |
 | **Go network** | 23 tests, 2 benchmarks | `go test` | Config parsing, EIP-1559 oracle, tx classification (V2/V3 selectors), multi-relay strategies |
-| **Rust core** | 33+ tests | `cargo test` + proptest | ABI encoding, constant-product math, V2/V3 calldata parsing, gRPC serialization, bundle construction, property-based invariants |
 | **Rust bench** | 7 groups | Criterion 0.5 | Full pipeline, keccak, AMM, pool lookup, ABI, U256, crossbeam |
 | **Solidity** | Foundry suite | `forge test` | Flash arbitrage execution, multi-DEX routing, callback validation |
 | **C hot path** | `make test` | Custom runner | Keccak correctness, RLP encoding, SIMD validation |
+
+### Rust Core — 170 Tests Breakdown
+
+| Module | Tests | Coverage |
+|--------|-------|----------|
+| `detector/arbitrage` | 26 | V2/V3/V3-output calldata parsing, ABI word decoders, `decode_addr`, `dex_from_fee`, `match_pool_to_swap`, profit calc (profitable/gas-exceeds/no-arb), truncated calldata |
+| `detector/backrun` | 3 | Swap selectors, price impact, small-swap filter |
+| `detector/liquidation` | 4 | Liquidation detection, healthy skip, close factor, stale pruning |
+| `detector/multi_threaded` | 1 | Parallel swap simulation |
+| `simulator` | 19 | Constant-product math (happy/zero/overflow/fee=100%), pool cache (load/update/get/reserves fallback), simulate (arb/backrun/liquidation/bundle), success rate |
+| `builder` | 16 | ABI encoding, all 3 bundle types, swap path (2-hop/empty/missing pool), no-contract error, count |
+| `config` | 9 | Serde roundtrip, save/reload, `from_env` fallback, chain defaults, strategy, performance |
+| `ffi/hot_path` | 24 | Keccak-256 known vectors, function selectors (`transfer`/`approve`/V2 swap), `address_eq`, RLP encoding, `OpportunityQueue` FIFO, `TxBuffer` cap, `SwapInfoFFI` |
+| `ffi` | 3 | Keccak fallback, RLP single byte, RLP short string |
+| `grpc/server` | 3 | `bytes_to_u128` edge cases |
+| `mempool/ultra_ws` | 11 | Tx hash extraction, swap classification (V2/V3/Universal Router), non-swap rejection |
+| `arbitrum/pools` | 12 | AMM `get_amount_out` (basic/reverse/zero/high-fee), `get_price`, token list validation |
+| `types` | 8 | `estimate_gas` for all DexType × OpportunityType combinations |
+| `proptest` | 23 | Constant-product invariants (7), ABI roundtrip (3), gas bounds (5), keccak (3), data structures (2), swap selectors (1), overflow safety (2) |
+| `integration` | 10 | Full pipeline end-to-end, engine lifecycle, all bundle types, simulator count |
+
+### Bugs Found & Fixed
+
+| Bug | Severity | Module | Fix |
+|-----|----------|--------|-----|
+| `is_likely_swap()` — OR condition classified all non-zero-first-byte txs as swaps | **Critical** | `mempool/ultra_ws` | Removed `\|\| (selector[0] != 0x00)` |
+| `constant_product_swap()` — unchecked u128 arithmetic silently overflowed on whale trades | **High** | `simulator` | `checked_mul`/`checked_add`, returns 0 on overflow |
+| Proptest tested local copy of AMM function, not production code | **High** | `tests/proptest` | Now imports `mev_core::simulator::constant_product_swap` directly |
 
 ---
 

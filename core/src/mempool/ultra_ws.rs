@@ -160,7 +160,9 @@ impl MempoolMonitor {
                             debug!("Received binary message: {} bytes", data.len());
                         }
                         Ok(Message::Ping(data)) => {
-                            write.send(Message::Pong(data)).await.ok();
+                            if let Err(e) = write.send(Message::Pong(data)).await {
+                                warn!(error = %e, "Failed to send WebSocket pong");
+                            }
                         }
                         Err(e) => {
                             error!("WebSocket error: {}", e);
@@ -315,7 +317,9 @@ impl EnhancedMempoolMonitor {
                                 first_seen_ns: receive_ns,
                             };
                             
-                            tx_sender.send(mempool_tx).ok();
+                            if let Err(e) = tx_sender.send(mempool_tx) {
+                                warn!(error = %e, "Mempool channel full, dropping tx");
+                            }
                         }
                     }
                 }
@@ -347,7 +351,7 @@ impl EnhancedMempoolMonitor {
             // Universal Router
             [0x36, 0x93, 0xd8, 0xa4] |  // execute
             [0x24, 0x85, 0x6b, 0xc3]    // execute with deadline
-        ) || (selector[0] != 0x00)     // Must not start with 0x00
+        )
     }
     
     /// Fast swap parsing
@@ -394,13 +398,98 @@ pub enum DexType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
-    fn test_extract_tx_hash() {
+    fn test_extract_tx_hash_correct_value() {
         let monitor = MempoolMonitor::new(MempoolConfig::default());
         let msg = r#"{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0x1","result":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}}"#;
-        
+
         let hash = monitor.extract_tx_hash_fast(msg);
         assert!(hash.is_some());
+        let expected = H256::from_slice(
+            &hex::decode("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef").unwrap(),
+        );
+        assert_eq!(hash.unwrap(), expected);
+    }
+
+    #[test]
+    fn test_extract_tx_hash_missing_result() {
+        let monitor = MempoolMonitor::new(MempoolConfig::default());
+        let msg = r#"{"jsonrpc":"2.0","id":1,"method":"eth_subscription"}"#;
+        assert!(monitor.extract_tx_hash_fast(msg).is_none());
+    }
+
+    #[test]
+    fn test_extract_tx_hash_truncated() {
+        let monitor = MempoolMonitor::new(MempoolConfig::default());
+        // Only 32 hex chars (16 bytes) instead of 64 (32 bytes)
+        let msg = r#"{"result":"0x1234567890abcdef1234567890abcdef"}"#;
+        assert!(monitor.extract_tx_hash_fast(msg).is_none());
+    }
+
+    #[test]
+    fn test_extract_tx_hash_invalid_hex() {
+        let monitor = MempoolMonitor::new(MempoolConfig::default());
+        let msg = r#"{"result":"0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"}"#;
+        assert!(monitor.extract_tx_hash_fast(msg).is_none());
+    }
+
+    // ── is_likely_swap tests (on EnhancedMempoolMonitor) ──
+
+    fn make_tx_with_input(input: Vec<u8>) -> Transaction {
+        let mut tx = Transaction::default();
+        tx.input = input.into();
+        tx
+    }
+
+    #[test]
+    fn test_is_swap_v2_swap_exact_tokens() {
+        let monitor = EnhancedMempoolMonitor::new(MempoolConfig::default());
+        let tx = make_tx_with_input(vec![0x38, 0xed, 0x17, 0x39, 0x00, 0x00]);
+        assert!(monitor.is_likely_swap(&tx));
+    }
+
+    #[test]
+    fn test_is_swap_v3_exact_input_single() {
+        let monitor = EnhancedMempoolMonitor::new(MempoolConfig::default());
+        let tx = make_tx_with_input(vec![0x41, 0x4b, 0xf3, 0x89, 0x00]);
+        assert!(monitor.is_likely_swap(&tx));
+    }
+
+    #[test]
+    fn test_is_swap_universal_router_execute() {
+        let monitor = EnhancedMempoolMonitor::new(MempoolConfig::default());
+        let tx = make_tx_with_input(vec![0x36, 0x93, 0xd8, 0xa4, 0x00]);
+        assert!(monitor.is_likely_swap(&tx));
+    }
+
+    #[test]
+    fn test_is_not_swap_approve() {
+        let monitor = EnhancedMempoolMonitor::new(MempoolConfig::default());
+        // approve(address,uint256) = 0x095ea7b3
+        let tx = make_tx_with_input(vec![0x09, 0x5e, 0xa7, 0xb3, 0x00]);
+        assert!(!monitor.is_likely_swap(&tx), "approve() should NOT be classified as swap");
+    }
+
+    #[test]
+    fn test_is_not_swap_transfer() {
+        let monitor = EnhancedMempoolMonitor::new(MempoolConfig::default());
+        // transfer(address,uint256) = 0xa9059cbb
+        let tx = make_tx_with_input(vec![0xa9, 0x05, 0x9c, 0xbb, 0x00]);
+        assert!(!monitor.is_likely_swap(&tx), "transfer() should NOT be classified as swap");
+    }
+
+    #[test]
+    fn test_is_not_swap_empty_input() {
+        let monitor = EnhancedMempoolMonitor::new(MempoolConfig::default());
+        let tx = make_tx_with_input(vec![]);
+        assert!(!monitor.is_likely_swap(&tx));
+    }
+
+    #[test]
+    fn test_is_not_swap_short_input() {
+        let monitor = EnhancedMempoolMonitor::new(MempoolConfig::default());
+        let tx = make_tx_with_input(vec![0x38, 0xed]); // only 2 bytes
+        assert!(!monitor.is_likely_swap(&tx));
     }
 }

@@ -172,7 +172,9 @@ impl MultiThreadedDetector {
                 match tx_receiver.recv_timeout(std::time::Duration::from_millis(10)) {
                     Ok(tx) => {
                         stats.txs_processed.fetch_add(1, Ordering::Relaxed);
-                        work_tx.send(tx).ok();
+                        if let Err(e) = work_tx.send(tx) {
+                            warn!(error = %e, "Work channel full, dropping tx");
+                        }
                     }
                     Err(_) => continue,
                 }
@@ -244,7 +246,9 @@ impl MultiThreadedDetector {
                                         
                                         if opp.net_profit_wei >= config.min_profit_wei {
                                             stats.profitable_count.fetch_add(1, Ordering::Relaxed);
-                                            opp_sender.send(opp).ok();
+                                            if let Err(e) = opp_sender.send(opp) {
+                                                warn!(error = %e, "Opportunity channel closed");
+                                            }
                                         }
                                     }
                                 }

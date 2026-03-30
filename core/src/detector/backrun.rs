@@ -5,7 +5,7 @@
 //! rides the price recovery toward the true market price.
 
 use crate::config::Config;
-use crate::types::{Opportunity, OpportunityType, PendingTx, DexType, PoolState};
+use crate::types::{Opportunity, OpportunityType, PendingTx, DexType, PoolState, estimate_gas};
 use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -92,9 +92,11 @@ impl BackrunDetector {
             token_out: "TARGET".to_string(),
             amount_in: backrun_amount,
             expected_profit: profit,
-            gas_estimate: 180_000,
+            gas_estimate: estimate_gas(&OpportunityType::Backrun, &[DexType::UniswapV3]),
             deadline: tx.timestamp + 12,
             path: vec![DexType::UniswapV3],
+            pool_addresses: vec![pool_addr],
+            pool_fees: vec![500],
             target_tx: Some(tx.hash),
         })
     }

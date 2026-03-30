@@ -5,7 +5,7 @@
 //! after gas and slippage.
 
 use crate::config::Config;
-use crate::types::{Opportunity, OpportunityType, PendingTx, SwapInfo, DexType, PoolState};
+use crate::types::{Opportunity, OpportunityType, PendingTx, SwapInfo, DexType, PoolState, estimate_gas};
 use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -85,15 +85,26 @@ impl ArbitrageDetector {
             "Arbitrage opportunity detected"
         );
 
+        // Resolve pool addresses from cache for each hop in the path
+        let entry_dex = swap.dex.clone();
+        let path = vec![entry_dex, exit_dex];
+        let pool_addresses = self.resolve_pool_addresses(&swap.token_in, &swap.token_out, &path);
+        let pool_fees = path.iter().map(|d| match d {
+            DexType::UniswapV3 => 500,
+            _ => 3000,
+        }).collect();
+
         Some(Opportunity {
             opportunity_type: OpportunityType::Arbitrage,
             token_in: swap.token_in,
             token_out: swap.token_out,
             amount_in: swap.amount_in,
             expected_profit: profit,
-            gas_estimate: 250_000,
+            gas_estimate: estimate_gas(&OpportunityType::Arbitrage, &path),
             deadline: tx.timestamp + 12,
-            path: vec![swap.dex.clone(), exit_dex],
+            path,
+            pool_addresses,
+            pool_fees,
             target_tx: Some(tx.hash),
         })
     }
@@ -401,6 +412,36 @@ impl ArbitrageDetector {
             .map(|(d, _)| d.clone())
             .unwrap_or(DexType::UniswapV3)
     }
+
+    /// Resolve actual pool contract addresses from the cache for each path hop.
+    /// Returns one address per hop. If a pool isn't found, uses [0u8; 20] placeholder.
+    fn resolve_pool_addresses(&self, token_in: &str, token_out: &str, path: &[DexType]) -> Vec<[u8; 20]> {
+        let cache = self.pool_cache.read();
+        let token_in_bytes = decode_addr(token_in);
+        let token_out_bytes = decode_addr(token_out);
+
+        path.iter().enumerate().map(|(i, dex)| {
+            // For a 2-hop arb: hop 0 = token_in → token_out, hop 1 = token_out → token_in
+            let (search_t0, search_t1) = if i == 0 {
+                (token_in_bytes, token_out_bytes)
+            } else {
+                (token_out_bytes, token_in_bytes)
+            };
+
+            // Search cache for a pool matching this token pair and DEX type
+            for (key, pool) in cache.iter() {
+                let pool_matches = (pool.token0 == search_t0 && pool.token1 == search_t1)
+                    || (pool.token0 == search_t1 && pool.token1 == search_t0);
+                if pool_matches {
+                    let pool_dex = dex_from_fee(pool.fee);
+                    if std::mem::discriminant(&pool_dex) == std::mem::discriminant(dex) {
+                        return pool.address;
+                    }
+                }
+            }
+            [0u8; 20] // fallback — pool not yet cached
+        }).collect()
+    }
 }
 
 // ─── ABI decode helpers ───────────────────────────────────────────
@@ -564,6 +605,276 @@ mod tests {
             (DexType::UniswapV2, 2000_000_000),
             (DexType::SushiSwap, 2000_000_000),
         ];
+        assert!(detector.calculate_profit(&swap, &prices).is_none());
+    }
+
+    // ── ABI word readers ──
+
+    #[test]
+    fn test_read_u64_from_word() {
+        let mut word = [0u8; 32];
+        word[31] = 42;
+        assert_eq!(read_u64_from_word(&word), 42);
+    }
+
+    #[test]
+    fn test_read_u64_from_short_slice() {
+        let short = [0u8; 16];
+        assert_eq!(read_u64_from_word(&short), 0);
+    }
+
+    #[test]
+    fn test_read_u32_from_word() {
+        let mut word = [0u8; 32];
+        word[28..32].copy_from_slice(&3000u32.to_be_bytes());
+        assert_eq!(read_u32_from_word(&word), 3000);
+    }
+
+    #[test]
+    fn test_read_u32_from_short_slice() {
+        let short = [0u8; 8];
+        assert_eq!(read_u32_from_word(&short), 0);
+    }
+
+    #[test]
+    fn test_read_u128_from_word_short_returns_zero() {
+        let short = [0xFFu8; 10];
+        assert_eq!(read_u128_from_word(&short), 0);
+    }
+
+    #[test]
+    fn test_read_usize_from_word() {
+        let mut word = [0u8; 32];
+        word[24..32].copy_from_slice(&160u64.to_be_bytes());
+        assert_eq!(read_usize_from_word(&word), 160);
+    }
+
+    // ── decode_addr ──
+
+    #[test]
+    fn test_decode_addr_with_prefix() {
+        let addr = decode_addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        assert_eq!(addr[0], 0xC0);
+        assert_eq!(addr[19], 0xC2);
+    }
+
+    #[test]
+    fn test_decode_addr_without_prefix() {
+        let addr = decode_addr("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        assert_eq!(addr[0], 0xC0);
+    }
+
+    #[test]
+    fn test_decode_addr_empty() {
+        let addr = decode_addr("");
+        assert_eq!(addr, [0u8; 20]);
+    }
+
+    #[test]
+    fn test_decode_addr_invalid_hex() {
+        let addr = decode_addr("0xGGGGGGGG");
+        assert_eq!(addr, [0u8; 20]);
+    }
+
+    // ── dex_from_fee ──
+
+    #[test]
+    fn test_dex_from_fee_v3_tiers() {
+        assert!(matches!(dex_from_fee(100), DexType::UniswapV3));
+        assert!(matches!(dex_from_fee(500), DexType::UniswapV3));
+        assert!(matches!(dex_from_fee(3000), DexType::UniswapV3));
+        assert!(matches!(dex_from_fee(10000), DexType::UniswapV3));
+    }
+
+    #[test]
+    fn test_dex_from_fee_sushi() {
+        assert!(matches!(dex_from_fee(9970), DexType::SushiSwap));
+    }
+
+    #[test]
+    fn test_dex_from_fee_default_v2() {
+        assert!(matches!(dex_from_fee(0), DexType::UniswapV2));
+        assert!(matches!(dex_from_fee(9999), DexType::UniswapV2));
+    }
+
+    // ── match_pool_to_swap ──
+
+    #[test]
+    fn test_match_pool_forward() {
+        let pool = PoolState {
+            address: [0xAA; 20],
+            token0: decode_addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+            token1: decode_addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+            reserve0: 1000,
+            reserve1: 2000,
+            fee: 3000,
+        };
+        let swap = SwapInfo {
+            dex: DexType::UniswapV2,
+            token_in: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
+            token_out: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            amount_in: 1000,
+            amount_out_min: 0,
+            fee: 3000,
+        };
+        let (is_match, is_reversed) = match_pool_to_swap(&pool, &swap);
+        assert!(is_match);
+        assert!(!is_reversed);
+    }
+
+    #[test]
+    fn test_match_pool_reversed() {
+        let pool = PoolState {
+            address: [0xAA; 20],
+            token0: decode_addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+            token1: decode_addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+            reserve0: 1000,
+            reserve1: 2000,
+            fee: 3000,
+        };
+        let swap = SwapInfo {
+            dex: DexType::UniswapV2,
+            token_in: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
+            token_out: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            amount_in: 1000,
+            amount_out_min: 0,
+            fee: 3000,
+        };
+        let (is_match, is_reversed) = match_pool_to_swap(&pool, &swap);
+        assert!(is_match);
+        assert!(is_reversed);
+    }
+
+    #[test]
+    fn test_match_pool_no_match() {
+        let pool = PoolState {
+            address: [0xAA; 20],
+            token0: [0x01; 20],
+            token1: [0x02; 20],
+            reserve0: 1000,
+            reserve1: 2000,
+            fee: 3000,
+        };
+        let swap = SwapInfo {
+            dex: DexType::UniswapV2,
+            token_in: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(),
+            token_out: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            amount_in: 1000,
+            amount_out_min: 0,
+            fee: 3000,
+        };
+        let (is_match, _) = match_pool_to_swap(&pool, &swap);
+        assert!(!is_match);
+    }
+
+    // ── V3 exact output single ──
+
+    #[test]
+    fn test_parse_v3_exact_output_single() {
+        let config = Arc::new(Config::default());
+        let detector = ArbitrageDetector::new(config);
+
+        let mut data = vec![0u8; 260];
+        data[0..4].copy_from_slice(&[0xdb, 0x3e, 0x21, 0x98]); // selector
+        data[16..36].copy_from_slice(&[0xAA; 20]); // tokenIn
+        data[48..68].copy_from_slice(&[0xBB; 20]); // tokenOut
+        data[96..100].copy_from_slice(&500u32.to_be_bytes()); // fee
+        let amount_out = 2_000_000_000u128;
+        data[180..196].copy_from_slice(&amount_out.to_be_bytes()); // amountOut
+        let amount_in_max = 1_000_000_000_000_000_000u128;
+        data[212..228].copy_from_slice(&amount_in_max.to_be_bytes()); // amountInMaximum
+
+        let swap = detector.parse_v3_exact_output_single(&data).unwrap();
+        assert_eq!(swap.amount_in, amount_in_max);
+        assert_eq!(swap.amount_out_min, amount_out);
+        assert_eq!(swap.fee, 500);
+        assert!(matches!(swap.dex, DexType::UniswapV3));
+    }
+
+    // ── V2 truncated data ──
+
+    #[test]
+    fn test_parse_v2_swap_truncated_returns_none() {
+        let config = Arc::new(Config::default());
+        let detector = ArbitrageDetector::new(config);
+        let short = vec![0x38, 0xed, 0x17, 0x39, 0x00]; // just selector + 1 byte
+        assert!(detector.parse_v2_swap(&short, false).is_none());
+    }
+
+    #[test]
+    fn test_parse_v3_truncated_returns_none() {
+        let config = Arc::new(Config::default());
+        let detector = ArbitrageDetector::new(config);
+        let short = vec![0u8; 100]; // < 260 required
+        assert!(detector.parse_v3_exact_input_single(&short).is_none());
+    }
+
+    // ── calculate_profit: profitable case ──
+
+    #[test]
+    fn test_calculate_profit_profitable() {
+        let mut config = Config::default();
+        config.strategy.max_gas_price_gwei = 1;
+        config.strategy.slippage_tolerance_bps = 50;
+        let detector = ArbitrageDetector::new(Arc::new(config));
+
+        let swap = SwapInfo {
+            dex: DexType::UniswapV2,
+            token_in: "0xweth".to_string(),
+            token_out: "0xusdc".to_string(),
+            amount_in: 1_000_000_000_000_000_000,
+            amount_out_min: 0,
+            fee: 3000,
+        };
+
+        // gas_cost = 250_000 * 1 gwei = 250_000_000_000_000 wei
+        // Spread must exceed gas_cost + slippage to be profitable
+        let prices = vec![
+            (DexType::UniswapV2,  1_000_000_000_000_000_000),
+            (DexType::UniswapV3,  2_000_000_000_000_000_000),
+        ];
+        let profit = detector.calculate_profit(&swap, &prices);
+        assert!(profit.is_some(), "1e18 spread should be profitable at 1 gwei gas");
+        assert!(profit.unwrap() > 0);
+    }
+
+    #[test]
+    fn test_calculate_profit_gas_exceeds() {
+        let mut config = Config::default();
+        config.strategy.max_gas_price_gwei = 1000; // Very high gas
+        let detector = ArbitrageDetector::new(Arc::new(config));
+
+        let swap = SwapInfo {
+            dex: DexType::UniswapV2,
+            token_in: "0xweth".to_string(),
+            token_out: "0xusdc".to_string(),
+            amount_in: 1_000_000,
+            amount_out_min: 0,
+            fee: 3000,
+        };
+
+        // Tiny spread — gas should eat it
+        let prices = vec![
+            (DexType::UniswapV2, 1000),
+            (DexType::UniswapV3, 1001),
+        ];
+        assert!(detector.calculate_profit(&swap, &prices).is_none());
+    }
+
+    #[test]
+    fn test_calculate_profit_single_price_returns_none() {
+        let config = Arc::new(Config::default());
+        let detector = ArbitrageDetector::new(config);
+        let swap = SwapInfo {
+            dex: DexType::UniswapV2,
+            token_in: "0xa".to_string(),
+            token_out: "0xb".to_string(),
+            amount_in: 1000,
+            amount_out_min: 0,
+            fee: 3000,
+        };
+        // Need at least 2 prices
+        let prices = vec![(DexType::UniswapV2, 2000)];
         assert!(detector.calculate_profit(&swap, &prices).is_none());
     }
 }

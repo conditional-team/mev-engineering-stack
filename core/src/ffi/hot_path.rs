@@ -363,14 +363,230 @@ impl TxBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use ethers::types::{Address, H256, U256};
+    use std::str::FromStr;
+
+    // ── Keccak256 known vectors ──
+
     #[test]
-    fn test_keccak256() {
-        // Only run if C lib is available
-        if std::env::var("MEV_FAST_LIB").is_ok() {
-            let hash = safe::keccak256_fast(b"hello");
-            assert!(!hash.is_zero());
+    fn test_keccak256_empty() {
+        let hash = safe::keccak256_fast(b"");
+        let expected = H256::from_str(
+            "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+        ).unwrap();
+        assert_eq!(hash, expected, "keccak256('') mismatch");
+    }
+
+    #[test]
+    fn test_keccak256_hello() {
+        let hash = safe::keccak256_fast(b"hello");
+        let expected = H256::from_str(
+            "0x1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8"
+        ).unwrap();
+        assert_eq!(hash, expected, "keccak256('hello') mismatch");
+    }
+
+    #[test]
+    fn test_keccak256_not_zero() {
+        let hash = safe::keccak256_fast(b"transfer(address,uint256)");
+        assert!(!hash.is_zero());
+    }
+
+    // ── Function selector ──
+
+    #[test]
+    fn test_function_selector_transfer() {
+        let sel = safe::function_selector("transfer(address,uint256)");
+        assert_eq!(sel, [0xa9, 0x05, 0x9c, 0xbb], "transfer selector mismatch");
+    }
+
+    #[test]
+    fn test_function_selector_approve() {
+        let sel = safe::function_selector("approve(address,uint256)");
+        assert_eq!(sel, [0x09, 0x5e, 0xa7, 0xb3], "approve selector mismatch");
+    }
+
+    #[test]
+    fn test_function_selector_swap_v2() {
+        let sel = safe::function_selector("swapExactTokensForTokens(uint256,uint256,address[],address,uint256)");
+        assert_eq!(sel, [0x38, 0xed, 0x17, 0x39], "V2 swap selector mismatch");
+    }
+
+    // ── Address equality ──
+
+    #[test]
+    fn test_address_eq_same() {
+        let addr = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        assert!(safe::address_eq(&addr, &addr));
+    }
+
+    #[test]
+    fn test_address_eq_different() {
+        let a = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let b = Address::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap();
+        assert!(!safe::address_eq(&a, &b));
+    }
+
+    #[test]
+    fn test_address_eq_zero() {
+        let zero = Address::zero();
+        assert!(safe::address_eq(&zero, &zero));
+    }
+
+    // ── RLP encoding ──
+
+    #[test]
+    fn test_rlp_encode_address_length() {
+        let addr = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let encoded = safe::rlp_encode_address(&addr);
+        assert_eq!(encoded.len(), 21, "RLP address should be 1 prefix + 20 bytes");
+        assert_eq!(encoded[0], 0x80 + 20, "RLP prefix for 20-byte string");
+    }
+
+    #[test]
+    fn test_rlp_encode_u256_zero() {
+        let encoded = safe::rlp_encode_u256(U256::zero());
+        // Zero encodes as a single byte 0x00 (short string)
+        assert!(!encoded.is_empty());
+        // RLP for 0 is [0x00] — single byte below 0x80
+        assert_eq!(encoded, vec![0x00]);
+    }
+
+    #[test]
+    fn test_rlp_encode_u256_small() {
+        let encoded = safe::rlp_encode_u256(U256::from(42));
+        // 42 < 0x80, so single byte encoding
+        assert_eq!(encoded, vec![42]);
+    }
+
+    #[test]
+    fn test_rlp_encode_u256_large() {
+        let val = U256::from(256u64); // > 0x80, needs prefix
+        let encoded = safe::rlp_encode_u256(val);
+        assert!(encoded.len() > 1, "large values need prefix");
+        assert_eq!(encoded[0], 0x80 + 2); // 256 = 0x0100 → 2 bytes
+        assert_eq!(encoded[1], 0x01);
+        assert_eq!(encoded[2], 0x00);
+    }
+
+    // ── calc_price_impact_batch ──
+
+    #[test]
+    fn test_price_impact_batch_basic() {
+        let r0 = [1_000_000u64, 2_000_000, 500_000, 10_000_000];
+        let r1 = [2_000_000u64, 1_000_000, 1_000_000, 5_000_000];
+        let amount_in = 10_000u64;
+        let outputs = safe::calc_price_impact_batch(&r0, &r1, amount_in);
+        // All outputs should be positive
+        for (i, &out) in outputs.iter().enumerate() {
+            assert!(out > 0, "pool {} should have positive output, got {}", i, out);
         }
+        // Pool 0: 10000 * 2M * 997 / (1M * 1000 + 10000 * 997) ≈ 19740
+        assert!(outputs[0] > 19_000 && outputs[0] < 20_000);
+    }
+
+    #[test]
+    fn test_price_impact_batch_zero_reserve() {
+        let r0 = [0u64, 1_000_000, 0, 1_000_000];
+        let r1 = [1_000_000u64, 1_000_000, 1_000_000, 1_000_000];
+        let outputs = safe::calc_price_impact_batch(&r0, &r1, 1000);
+        assert_eq!(outputs[0], 0, "zero reserve should produce zero output");
+        assert_eq!(outputs[2], 0, "zero reserve should produce zero output");
+        assert!(outputs[1] > 0);
+    }
+
+    // ── OpportunityQueue ──
+
+    #[test]
+    fn test_queue_new_not_none() {
+        let q = OpportunityQueue::new(16);
+        assert!(q.is_some());
+    }
+
+    #[test]
+    fn test_queue_push_pop() {
+        let q = OpportunityQueue::new(16).unwrap();
+        assert!(q.is_empty());
+        assert_eq!(q.len(), 0);
+
+        let val: u64 = 42;
+        let ptr = &val as *const u64 as *mut c_void;
+        assert!(q.push(ptr));
+        assert_eq!(q.len(), 1);
+        assert!(!q.is_empty());
+
+        let popped = q.pop();
+        assert!(popped.is_some());
+        assert_eq!(q.len(), 0);
+    }
+
+    #[test]
+    fn test_queue_pop_empty() {
+        let q = OpportunityQueue::new(16).unwrap();
+        assert!(q.pop().is_none());
+    }
+
+    #[test]
+    fn test_queue_fifo_order() {
+        let q = OpportunityQueue::new(16).unwrap();
+        let a: u64 = 1;
+        let b: u64 = 2;
+        let c: u64 = 3;
+        q.push(&a as *const u64 as *mut c_void);
+        q.push(&b as *const u64 as *mut c_void);
+        q.push(&c as *const u64 as *mut c_void);
+        assert_eq!(q.len(), 3);
+
+        let p1 = q.pop().unwrap();
+        let p2 = q.pop().unwrap();
+        let p3 = q.pop().unwrap();
+        assert_eq!(p1, &a as *const u64 as *mut c_void);
+        assert_eq!(p2, &b as *const u64 as *mut c_void);
+        assert_eq!(p3, &c as *const u64 as *mut c_void);
+    }
+
+    // ── TxBuffer ──
+
+    #[test]
+    fn test_txbuffer_new() {
+        let buf = TxBuffer::new();
+        assert!(buf.is_some());
+    }
+
+    #[test]
+    fn test_txbuffer_initial_empty() {
+        let buf = TxBuffer::new().unwrap();
+        assert_eq!(buf.as_slice().len(), 0);
+    }
+
+    #[test]
+    fn test_txbuffer_write_and_read() {
+        let mut buf = TxBuffer::new().unwrap();
+        let slice = buf.as_mut_slice(4);
+        slice[0] = 0xDE;
+        slice[1] = 0xAD;
+        slice[2] = 0xBE;
+        slice[3] = 0xEF;
+        let read = buf.as_slice();
+        assert_eq!(read, &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn test_txbuffer_cap_at_512() {
+        let mut buf = TxBuffer::new().unwrap();
+        let slice = buf.as_mut_slice(1000); // request more than 512
+        assert_eq!(slice.len(), 512, "should be capped at 512");
+    }
+
+    // ── SwapInfoFFI default ──
+
+    #[test]
+    fn test_swap_info_ffi_default() {
+        let info = SwapInfoFFI::default();
+        assert_eq!(info.dex_type, 0);
+        assert_eq!(info.fee, 0);
+        assert_eq!(info.token_in, [0u8; 20]);
+        assert_eq!(info.amount_in, [0u8; 32]);
     }
 }
 

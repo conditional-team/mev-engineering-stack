@@ -187,6 +187,8 @@ impl LiquidationDetector {
             gas_estimate: gas,
             deadline: u64::MAX, // Liquidations are valid as long as health < 1
             path: vec![DexType::UniswapV3],
+            pool_addresses: vec![],
+            pool_fees: vec![],
             target_tx: None,
         })
     }

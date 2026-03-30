@@ -6,16 +6,20 @@
 //! estimates before committing to bundle submission.
 
 use crate::config::Config;
-use crate::types::{Opportunity, OpportunityType, SimulationResult, Bundle, StateChange};
+use crate::types::{Opportunity, OpportunityType, SimulationResult, Bundle, StateChange, PoolState};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+use parking_lot::RwLock;
 use tracing::{debug, warn, info};
 
-/// Constant-product AMM simulation parameters
-const WETH_RESERVE: u128 = 5_000_000_000_000_000_000_000; // 5000 ETH
-const USDC_RESERVE: u128 = 10_000_000_000_000;             // 10M USDC (6 dec)
-const FEE_BPS: u128 = 30;                                   // 0.30%
+/// Default reserves used ONLY when pool cache has no data for a pair.
+/// In production the pool refresh loop should populate the cache before
+/// the simulator is invoked hot-path.
+const DEFAULT_WETH_RESERVE: u128 = 5_000_000_000_000_000_000_000; // 5000 ETH
+const DEFAULT_USDC_RESERVE: u128 = 10_000_000_000_000;             // 10M USDC (6 dec)
+const DEFAULT_FEE_BPS: u128 = 30;                                   // 0.30%
 
 /// EVM Simulator for transaction simulation
 pub struct EvmSimulator {
@@ -23,6 +27,10 @@ pub struct EvmSimulator {
     count: AtomicU64,
     success_count: AtomicU64,
     total_latency_us: AtomicU64,
+    /// Dynamic pool cache — keyed by pool address
+    pool_cache: Arc<RwLock<HashMap<[u8; 20], PoolState>>>,
+    /// Secondary index: (token0, token1) → list of pool addresses
+    pair_index: Arc<RwLock<HashMap<([u8; 20], [u8; 20]), Vec<[u8; 20]>>>>,
 }
 
 impl EvmSimulator {
@@ -32,7 +40,50 @@ impl EvmSimulator {
             count: AtomicU64::new(0),
             success_count: AtomicU64::new(0),
             total_latency_us: AtomicU64::new(0),
+            pool_cache: Arc::new(RwLock::new(HashMap::new())),
+            pair_index: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Bulk-load pool states into the simulator cache.
+    /// Called by the pool refresh loop on startup and periodically.
+    pub fn load_pools(&self, pools: Vec<PoolState>) {
+        let mut cache = self.pool_cache.write();
+        let mut idx = self.pair_index.write();
+        for pool in pools {
+            let addr = pool.address;
+            let key = ordered_pair(pool.token0, pool.token1);
+            idx.entry(key).or_default().push(addr);
+            cache.insert(addr, pool);
+        }
+        info!(pool_count = cache.len(), "Pool cache loaded");
+    }
+
+    /// Update a single pool (e.g. from a Sync event).
+    pub fn update_pool(&self, pool: PoolState) {
+        let addr = pool.address;
+        let mut cache = self.pool_cache.write();
+        if !cache.contains_key(&addr) {
+            let key = ordered_pair(pool.token0, pool.token1);
+            self.pair_index.write().entry(key).or_default().push(addr);
+        }
+        cache.insert(addr, pool);
+    }
+
+    /// Look up a pool by its address.
+    pub fn get_pool(&self, address: &[u8; 20]) -> Option<PoolState> {
+        self.pool_cache.read().get(address).cloned()
+    }
+
+    /// Look up reserves for a specific pool address, falling back to defaults.
+    fn pool_reserves(&self, pool_addr: &[u8; 20]) -> (u128, u128, u128) {
+        if *pool_addr != [0u8; 20] {
+            if let Some(pool) = self.pool_cache.read().get(pool_addr) {
+                return (pool.reserve0, pool.reserve1, pool.fee as u128);
+            }
+            warn!(pool = ?pool_addr, "Pool not in cache, using default reserves");
+        }
+        (DEFAULT_WETH_RESERVE, DEFAULT_USDC_RESERVE, DEFAULT_FEE_BPS)
     }
 
     pub async fn start(&self) -> anyhow::Result<()> {
@@ -157,37 +208,28 @@ impl EvmSimulator {
         // Step 1: Flash loan amount_in of token_in
         let flash_amount = opp.amount_in;
 
-        // Step 2: Simulate swap on entry DEX (constant product)
-        let entry_fee = if opp.path.len() > 0 {
-            match &opp.path[0] {
-                crate::types::DexType::UniswapV3 => 5, // 0.05%
-                _ => 30, // 0.30%
-            }
-        } else {
-            30
-        };
-        let amount_mid = constant_product_swap(
-            flash_amount,
-            WETH_RESERVE,
-            USDC_RESERVE,
-            entry_fee,
-        );
+        // Step 2: Look up entry pool reserves from cache
+        let entry_addr = opp.pool_addresses.first().copied().unwrap_or([0u8; 20]);
+        let (entry_r0, entry_r1, entry_default_fee) = self.pool_reserves(&entry_addr);
 
-        // Step 3: Simulate swap back on exit DEX
-        let exit_fee = if opp.path.len() > 1 {
-            match &opp.path[1] {
-                crate::types::DexType::UniswapV3 => 5,
-                _ => 30,
-            }
+        let entry_fee = if let Some(&fee) = opp.pool_fees.first() {
+            (fee / 100) as u128  // pool_fees stores raw bps * 100 (e.g. 3000 = 30 bps)
         } else {
-            30
+            entry_default_fee
         };
-        let amount_out = constant_product_swap(
-            amount_mid,
-            USDC_RESERVE,
-            WETH_RESERVE,
-            exit_fee,
-        );
+        let amount_mid = constant_product_swap(flash_amount, entry_r0, entry_r1, entry_fee);
+
+        // Step 3: Look up exit pool reserves from cache
+        let exit_addr = opp.pool_addresses.get(1).copied().unwrap_or([0u8; 20]);
+        let (exit_r0, exit_r1, exit_default_fee) = self.pool_reserves(&exit_addr);
+
+        let exit_fee = if let Some(&fee) = opp.pool_fees.get(1) {
+            (fee / 100) as u128
+        } else {
+            exit_default_fee
+        };
+        // Swap back: mid-token → original token (reverse reserves)
+        let amount_out = constant_product_swap(amount_mid, exit_r1, exit_r0, exit_fee);
 
         // Step 4: Calculate profit
         let gross: i128 = amount_out as i128 - flash_amount as i128;
@@ -205,16 +247,16 @@ impl EvmSimulator {
         // State changes: record the two pool reserve updates
         let state_changes = vec![
             StateChange {
-                address: [0xA0; 20], // entry pool
+                address: entry_addr,
                 slot: [0u8; 32],
-                old_value: u128_to_bytes32(WETH_RESERVE),
-                new_value: u128_to_bytes32(WETH_RESERVE + flash_amount),
+                old_value: u128_to_bytes32(entry_r0),
+                new_value: u128_to_bytes32(entry_r0 + flash_amount),
             },
             StateChange {
-                address: [0xB0; 20], // exit pool
+                address: exit_addr,
                 slot: [0u8; 32],
-                old_value: u128_to_bytes32(USDC_RESERVE),
-                new_value: u128_to_bytes32(USDC_RESERVE + amount_mid),
+                old_value: u128_to_bytes32(exit_r1),
+                new_value: u128_to_bytes32(exit_r1 + amount_mid),
             },
         ];
 
@@ -229,24 +271,34 @@ impl EvmSimulator {
 
     /// Simulate backrun: execute after large swap to capture price recovery
     fn simulate_backrun(&self, opp: &Opportunity) -> anyhow::Result<SimulationResult> {
+        // Look up pool reserves from cache
+        let pool_addr = opp.pool_addresses.first().copied().unwrap_or([0u8; 20]);
+        let (r0, r1, fee) = self.pool_reserves(&pool_addr);
+
+        let fee = opp.pool_fees.first().map(|&f| (f / 100) as u128).unwrap_or(fee);
+
         // After a large swap, pool reserves are skewed.
         // Apply a 0.2% reserve shift to model post-swap state.
-        let skewed_reserve0 = WETH_RESERVE * 10020 / 10000;
-        let skewed_reserve1 = USDC_RESERVE * 9980 / 10000;
+        let skewed_reserve0 = r0 * 10020 / 10000;
+        let skewed_reserve1 = r1 * 9980 / 10000;
 
         let amount_mid = constant_product_swap(
             opp.amount_in,
             skewed_reserve0,
             skewed_reserve1,
-            FEE_BPS,
+            fee,
         );
 
         // Swap back at fair-value pool (another DEX or same after rebalance)
+        let exit_addr = opp.pool_addresses.get(1).copied().unwrap_or([0u8; 20]);
+        let (exit_r0, exit_r1, exit_fee) = self.pool_reserves(&exit_addr);
+        let exit_fee = opp.pool_fees.get(1).map(|&f| (f / 100) as u128).unwrap_or(exit_fee);
+
         let amount_out = constant_product_swap(
             amount_mid,
-            USDC_RESERVE,
-            WETH_RESERVE,
-            FEE_BPS,
+            exit_r1,
+            exit_r0,
+            exit_fee,
         );
 
         let gas_cost = opp.gas_estimate as i128
@@ -306,20 +358,39 @@ impl EvmSimulator {
 
 // ─── helpers ──────────────────────────────────────────────────────
 
-/// Constant product AMM: dy = y * dx * (1-fee) / (x + dx * (1-fee))
+/// Canonical pair ordering so (tokenA, tokenB) and (tokenB, tokenA) hit the same key.
 #[inline]
-fn constant_product_swap(
+fn ordered_pair(a: [u8; 20], b: [u8; 20]) -> ([u8; 20], [u8; 20]) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+/// Constant product AMM: dy = y * dx * (1-fee) / (x + dx * (1-fee))
+/// Uses checked arithmetic to prevent silent overflow on large inputs.
+#[inline]
+pub fn constant_product_swap(
     amount_in: u128,
     reserve_in: u128,
     reserve_out: u128,
     fee_bps: u128,
 ) -> u128 {
-    if reserve_in == 0 || reserve_out == 0 || amount_in == 0 {
+    if reserve_in == 0 || reserve_out == 0 || amount_in == 0 || fee_bps >= 10_000 {
         return 0;
     }
-    let amount_in_with_fee = amount_in * (10_000 - fee_bps);
-    let numerator = amount_in_with_fee * reserve_out;
-    let denominator = reserve_in * 10_000 + amount_in_with_fee;
+    let amount_in_with_fee = match amount_in.checked_mul(10_000 - fee_bps) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let numerator = match amount_in_with_fee.checked_mul(reserve_out) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let denominator = match reserve_in.checked_mul(10_000) {
+        Some(v) => match v.checked_add(amount_in_with_fee) {
+            Some(d) => d,
+            None => return 0,
+        },
+        None => return 0,
+    };
     if denominator == 0 { 0 } else { numerator / denominator }
 }
 
@@ -391,6 +462,8 @@ mod tests {
             gas_estimate: 250_000,
             deadline: 0,
             path: vec![crate::types::DexType::UniswapV2, crate::types::DexType::UniswapV3],
+            pool_addresses: vec![[0xAA; 20], [0xBB; 20]],
+            pool_fees: vec![3000, 500],
             target_tx: None,
         };
 
@@ -413,6 +486,8 @@ mod tests {
             gas_estimate: 500_000,
             deadline: 0,
             path: vec![],
+            pool_addresses: vec![],
+            pool_fees: vec![],
             target_tx: None,
         };
 
@@ -427,5 +502,207 @@ mod tests {
         let gas = estimate_tx_gas(500_000, &data);
         // 21000 + 3*16 + 1*4 + 100000 = 121052
         assert_eq!(gas, 121_052);
+    }
+
+    // ── Pool cache tests ──
+
+    #[test]
+    fn test_load_pools_and_get() {
+        let sim = EvmSimulator::new(test_config());
+        let pool = PoolState {
+            address: [0xAA; 20],
+            token0: [0x01; 20],
+            token1: [0x02; 20],
+            reserve0: 5_000_000_000_000_000_000_000,
+            reserve1: 10_000_000_000_000,
+            fee: 3000,
+        };
+        sim.load_pools(vec![pool.clone()]);
+
+        let fetched = sim.get_pool(&[0xAA; 20]);
+        assert!(fetched.is_some());
+        let f = fetched.unwrap();
+        assert_eq!(f.reserve0, 5_000_000_000_000_000_000_000);
+        assert_eq!(f.reserve1, 10_000_000_000_000);
+    }
+
+    #[test]
+    fn test_update_pool_inserts_new() {
+        let sim = EvmSimulator::new(test_config());
+        assert!(sim.get_pool(&[0xBB; 20]).is_none());
+
+        sim.update_pool(PoolState {
+            address: [0xBB; 20],
+            token0: [0x01; 20],
+            token1: [0x02; 20],
+            reserve0: 1000,
+            reserve1: 2000,
+            fee: 500,
+        });
+        assert!(sim.get_pool(&[0xBB; 20]).is_some());
+    }
+
+    #[test]
+    fn test_update_pool_overwrites_reserves() {
+        let sim = EvmSimulator::new(test_config());
+        sim.update_pool(PoolState {
+            address: [0xCC; 20],
+            token0: [0x01; 20],
+            token1: [0x02; 20],
+            reserve0: 1000,
+            reserve1: 2000,
+            fee: 500,
+        });
+        sim.update_pool(PoolState {
+            address: [0xCC; 20],
+            token0: [0x01; 20],
+            token1: [0x02; 20],
+            reserve0: 9999,
+            reserve1: 8888,
+            fee: 500,
+        });
+        let p = sim.get_pool(&[0xCC; 20]).unwrap();
+        assert_eq!(p.reserve0, 9999);
+        assert_eq!(p.reserve1, 8888);
+    }
+
+    #[test]
+    fn test_pool_reserves_from_cache() {
+        let sim = EvmSimulator::new(test_config());
+        sim.update_pool(PoolState {
+            address: [0xDD; 20],
+            token0: [0x01; 20],
+            token1: [0x02; 20],
+            reserve0: 42,
+            reserve1: 84,
+            fee: 300,
+        });
+        let (r0, r1, fee) = sim.pool_reserves(&[0xDD; 20]);
+        assert_eq!(r0, 42);
+        assert_eq!(r1, 84);
+        assert_eq!(fee, 300);
+    }
+
+    #[test]
+    fn test_pool_reserves_fallback_defaults() {
+        let sim = EvmSimulator::new(test_config());
+        // Unknown pool → default reserves
+        let (r0, r1, fee) = sim.pool_reserves(&[0xFF; 20]);
+        assert_eq!(r0, DEFAULT_WETH_RESERVE);
+        assert_eq!(r1, DEFAULT_USDC_RESERVE);
+        assert_eq!(fee, DEFAULT_FEE_BPS);
+    }
+
+    #[test]
+    fn test_pool_reserves_zero_addr_uses_default() {
+        let sim = EvmSimulator::new(test_config());
+        let (r0, _r1, _fee) = sim.pool_reserves(&[0u8; 20]);
+        assert_eq!(r0, DEFAULT_WETH_RESERVE);
+    }
+
+    // ── Overflow safety ──
+
+    #[test]
+    fn test_constant_product_no_panic_on_overflow() {
+        // Whale trade: near u128::MAX values — must not panic
+        let out = constant_product_swap(
+            u128::MAX / 2,
+            u128::MAX / 3,
+            u128::MAX / 4,
+            30,
+        );
+        // Should return 0 (overflow) rather than wrapping
+        assert_eq!(out, 0, "overflow should produce 0, not wrapped value");
+    }
+
+    #[test]
+    fn test_constant_product_fee_100_percent() {
+        let out = constant_product_swap(1_000_000, 5_000_000, 10_000_000, 10_000);
+        assert_eq!(out, 0, "100% fee should yield zero output");
+    }
+
+    #[test]
+    fn test_ordered_pair_canonical() {
+        let a = [0x01; 20];
+        let b = [0x02; 20];
+        assert_eq!(ordered_pair(a, b), (a, b));
+        assert_eq!(ordered_pair(b, a), (a, b));
+    }
+
+    #[tokio::test]
+    async fn test_simulate_backrun() {
+        let sim = EvmSimulator::new(test_config());
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Backrun,
+            token_in: "WETH".to_string(),
+            token_out: "USDC".to_string(),
+            amount_in: 500_000_000_000_000_000, // 0.5 ETH
+            expected_profit: 0,
+            gas_estimate: 180_000,
+            deadline: 0,
+            path: vec![crate::types::DexType::UniswapV3],
+            pool_addresses: vec![[0xAA; 20]],
+            pool_fees: vec![500],
+            target_tx: None,
+        };
+        let result = sim.simulate(&opp).await;
+        assert!(result.gas_used > 0);
+    }
+
+    #[tokio::test]
+    async fn test_simulate_liquidation() {
+        let sim = EvmSimulator::new(test_config());
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Liquidation,
+            token_in: "USDC".to_string(),
+            token_out: "WETH".to_string(),
+            amount_in: 10_000_000_000_000_000_000,
+            expected_profit: 500_000_000_000_000_000,
+            gas_estimate: 450_000,
+            deadline: 0,
+            path: vec![],
+            pool_addresses: vec![],
+            pool_fees: vec![],
+            target_tx: None,
+        };
+        let result = sim.simulate(&opp).await;
+        assert!(result.gas_used > 0);
+        // Liquidation with 5% bonus on 10 ETH should be profitable
+        assert!(result.success);
+        assert!(result.profit > 0);
+    }
+
+    #[test]
+    fn test_success_rate() {
+        let sim = EvmSimulator::new(test_config());
+        assert_eq!(sim.success_rate(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_simulate_bundle() {
+        use crate::types::{Bundle, BundleTransaction};
+        let sim = EvmSimulator::new(test_config());
+        let bundle = Bundle {
+            transactions: vec![
+                BundleTransaction {
+                    to: "0xdead".to_string(),
+                    value: 0,
+                    gas_limit: 300_000,
+                    gas_price: None,
+                    max_fee_per_gas: None,
+                    max_priority_fee_per_gas: Some(1_000_000_000),
+                    data: vec![0x12, 0x34, 0x56],
+                    nonce: None,
+                },
+            ],
+            target_block: Some(1000),
+            max_block_number: Some(1002),
+            min_timestamp: None,
+            max_timestamp: None,
+            reverting_tx_hashes: vec![],
+        };
+        let result = sim.simulate_bundle(&bundle).await;
+        assert!(result.gas_used > 0);
+        assert_eq!(result.state_changes.len(), 1);
     }
 }

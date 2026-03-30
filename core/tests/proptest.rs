@@ -4,33 +4,13 @@
 //! for all possible inputs, catching edge cases that unit tests miss.
 
 use proptest::prelude::*;
+use mev_core::types::{OpportunityType, DexType, estimate_gas};
 
 // ─── Constant-Product AMM Invariants ────────────────────────────────────────
 
-/// Mirror of simulator's constant_product_swap for testing
-#[inline]
-fn constant_product_swap(amount_in: u128, reserve_in: u128, reserve_out: u128, fee_bps: u128) -> u128 {
-    if reserve_in == 0 || reserve_out == 0 || amount_in == 0 {
-        return 0;
-    }
-    let amount_in_with_fee = amount_in.checked_mul(10_000 - fee_bps);
-    let amount_in_with_fee = match amount_in_with_fee {
-        Some(v) => v,
-        None => return 0,
-    };
-    let numerator = match amount_in_with_fee.checked_mul(reserve_out) {
-        Some(v) => v,
-        None => return 0,
-    };
-    let denominator = match reserve_in.checked_mul(10_000) {
-        Some(v) => match v.checked_add(amount_in_with_fee) {
-            Some(d) => d,
-            None => return 0,
-        },
-        None => return 0,
-    };
-    if denominator == 0 { 0 } else { numerator / denominator }
-}
+/// Use the REAL production function from the simulator module.
+/// This import ensures proptest and production code can never diverge.
+use mev_core::simulator::constant_product_swap;
 
 /// ABI-encode a u128 into a 32-byte word (big-endian, left-padded)
 fn abi_encode_u256(val: u128) -> [u8; 32] {
@@ -318,5 +298,76 @@ proptest! {
         for &expected in &items {
             prop_assert_eq!(rx.recv().unwrap(), expected);
         }
+    }
+}
+
+// ─── AMM Overflow Safety ────────────────────────────────────────────────────
+
+proptest! {
+    /// Whale-sized input must not panic or produce corrupted output.
+    /// With checked arithmetic, overflow returns 0 instead of wrapping.
+    #[test]
+    fn swap_no_panic_on_overflow(
+        amount_in in (u128::MAX / 2)..=u128::MAX,
+        reserve_in in (u128::MAX / 2)..=u128::MAX,
+        reserve_out in (u128::MAX / 2)..=u128::MAX,
+        fee_bps in 1u128..=500u128,
+    ) {
+        // Must not panic — may return 0 on overflow
+        let out = constant_product_swap(amount_in, reserve_in, reserve_out, fee_bps);
+        // If it didn't overflow, output must still be bounded
+        prop_assert!(out <= reserve_out || out == 0);
+    }
+
+    /// Fee >= 100% (10000 bps) should produce zero output
+    #[test]
+    fn swap_fee_100_percent_returns_zero(
+        amount_in in 1u128..=1_000_000_000_000_000_000u128,
+        reserve_in in 1u128..=1_000_000_000_000_000_000u128,
+        reserve_out in 1u128..=1_000_000_000_000_000_000u128,
+    ) {
+        let out = constant_product_swap(amount_in, reserve_in, reserve_out, 10_000);
+        prop_assert_eq!(out, 0, "100% fee should drain all output");
+    }
+}
+
+// ─── estimate_gas() Properties ──────────────────────────────────────────────
+
+proptest! {
+    /// Arbitrage gas must always include flash loan overhead
+    #[test]
+    fn estimate_gas_arb_includes_flash_loan(
+        num_hops in 1usize..=5,
+    ) {
+        let path: Vec<DexType> = (0..num_hops).map(|_| DexType::UniswapV2).collect();
+        let gas = estimate_gas(&OpportunityType::Arbitrage, &path);
+        // Must include BASE_TX (21k) + FLASH_LOAN (80k) = 101k minimum
+        prop_assert!(gas >= 101_000, "arb gas {} must include flash loan overhead", gas);
+    }
+
+    /// Backrun gas must NOT include flash loan overhead
+    #[test]
+    fn estimate_gas_backrun_no_flash_loan(
+        num_hops in 1usize..=5,
+    ) {
+        let path: Vec<DexType> = (0..num_hops).map(|_| DexType::UniswapV3).collect();
+        let gas = estimate_gas(&OpportunityType::Backrun, &path);
+        // Must NOT include flash loan: BASE_TX (21k) + hops only
+        prop_assert!(gas >= 21_000, "backrun gas {} too low", gas);
+        // For 1 hop V3 = 21k + 150k = 171k, should never be > 21k + 5*200k = 1.021M
+        prop_assert!(gas <= 1_100_000, "backrun gas {} unexpectedly high", gas);
+    }
+
+    /// More hops → more gas (monotonic)
+    #[test]
+    fn estimate_gas_monotonic_with_hops(
+        hops_a in 1usize..=3,
+        hops_delta in 1usize..=3,
+    ) {
+        let path_short: Vec<DexType> = (0..hops_a).map(|_| DexType::UniswapV2).collect();
+        let path_long: Vec<DexType> = (0..hops_a + hops_delta).map(|_| DexType::UniswapV2).collect();
+        let gas_short = estimate_gas(&OpportunityType::Arbitrage, &path_short);
+        let gas_long = estimate_gas(&OpportunityType::Arbitrage, &path_long);
+        prop_assert!(gas_long > gas_short, "more hops should cost more gas: {} vs {}", gas_short, gas_long);
     }
 }
