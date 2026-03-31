@@ -243,7 +243,7 @@ cd core && cargo bench
 | `MEV_PIPELINE_WORKERS` | Parallel classification workers | `4` |
 | `MEV_METRICS_ADDR` | Prometheus metrics bind address | `:9090` |
 
-See [.env.example](.env.example) for the full list.
+See [.env.example](.env.example) for the full list. See [CONFIG.md](CONFIG.md) for detailed field descriptions of all configuration files.
 
 ---
 
