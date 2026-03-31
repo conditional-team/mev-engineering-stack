@@ -58,7 +58,7 @@ Sub-microsecond mempool monitoring, transaction classification, bundle construct
 | **network/** | Go 1.21 | Mempool monitoring, tx classification, Flashbots relay, Prometheus metrics | `cmd/mev-node/main.go` |
 | **core/** | Rust 2021 | MEV detection (arbitrage + backrun + liquidation), AMM simulation (V2 constant-product + V3 concentrated liquidity), bundle construction, gRPC server | `src/main.rs` |
 | **fast/** | C (GCC/Clang) | SIMD keccak (`memcpy`-safe absorb), RLP encoding, lock-free MPSC queue (CAS slot-claim), arena allocator (batch + rollback) | `src/keccak.c` |
-| **contracts/** | Solidity | Flash loan arbitrage (Balancer V2), multi-DEX routing | `src/FlashArbitrage.sol` |
+| **contracts/** | Solidity + Yul | Flash loan arbitrage (Balancer V2, 0% fee), multi-DEX routing (direct pool calls), inline Yul assembly (ERC20 hot path), YulUtils library (15+ pure assembly helpers) | `src/FlashArbitrage.sol` |
 | **proto/** | Protocol Buffers | Cross-language service contract (Go ↔ Rust) | `mev.proto` |
 
 ---
@@ -202,17 +202,89 @@ Target: **< 10ms** round-trip for detect + simulate + bundle on co-located infra
 
 ## Smart Contracts — `contracts/`
 
-Foundry-based Solidity with hardened callback validation. 5-field execution context prevents callback forgery (executor, token, amount, swapHash, nonce). Factory-verified pool addresses.
+Solidity + targeted inline Yul assembly. Foundry-based build, **14 tests** (access control, callback hardening, fuzz, invariant).
 
-| Contract | Purpose | Security |
-|----------|---------|----------|
-| **FlashArbitrage.sol** | Balancer V2 flash loan → multi-DEX execution | Callback bound to (executor, token, amount, swap hash) |
-| **MultiDexRouter.sol** | Aggregated routing across V2/V3/Sushi/Curve | Trusted factory/router whitelist, strict ERC20 checks |
+**Architecture:** Balancer V2 flash loan (0% fee vs Aave's 0.09%) → multi-hop atomic swaps → profit check → repay. Single-tx execution, reverts if unprofitable.
+
+### Contract Overview
+
+| Contract | Purpose | Gas Optimization |
+|----------|---------|-----------------|
+| **FlashArbitrage.sol** | Balancer V2 flash loan → multi-DEX routing, callback hardening | Inline Yul: `_balanceOf()`, `_safeTransfer()`, `_safeApprove()` skip ABI encoder/decoder |
+| **MultiDexRouter.sol** | V2/V3/Sushi direct pool calls (bypasses routers), packed calldata paths | Uses `YulUtils.sol` for all AMM math + calldata parsing |
+| **YulUtils.sol** | Pure Yul assembly library — 15+ functions, `internal pure` for compiler inlining | Zero external call overhead: `mulDiv()`, `sqrt()`, `getAmountOut()`, `hash2()`, `loadCalldataAddress()` |
+
+### Why Yul
+
+In MEV, gas saved = profit captured. Yul is used **only** in the hot loop (ERC20 ops called per swap, AMM math per hop), not in business logic:
+
+```
+executeArbitrage()              ← Solidity (readable, auditable)
+  └─ receiveFlashLoan()         ← Solidity (5-field callback validation)
+       └─ _executeSwaps()       ← Solidity (routing logic)
+            ├─ _swapUniV2()     ← Solidity + Yul (_safeApprove, _safeTransfer)
+            ├─ _swapUniV3()     ← Solidity + Yul (_safeTransfer in callback)
+            └─ getAmountOut()   ← YulUtils (pure assembly, constant-product)
+```
+
+### Callback Security Model
+
+5-field execution context prevents forged callbacks — even if attacker controls a malicious token:
+
+```
+executeArbitrage() sets: executionActive, pendingExecutor, pendingToken, pendingAmount, pendingSwapHash
+  → Vault calls receiveFlashLoan()
+    → Validates: msg.sender == BALANCER_VAULT
+    → Validates: executionActive == true
+    → Validates: keccak256(executor, token, amount, nonce) == pendingSwapHash
+    → Executes swaps → checks profit ≥ MIN_PROFIT_BPS (0.1%) → repays loan
+  → Clears context + increments nonce (replay protection)
+```
+
+### Packed Calldata (MultiDexRouter)
+
+`executeSwapPath()` uses custom-packed encoding instead of ABI — parsed with Yul `loadCalldataAddress()`:
+
+```
+[amountIn: 32B][tokenIn: 20B][numSwaps: 1B][swapType: 1B][pool: 20B][tokenOut: 20B] × N
+```
+
+### Interfaces
+
+| Interface | Coverage |
+|-----------|----------|
+| `IBalancerVault.sol` | `flashLoan()` + `IFlashLoanRecipient` callback |
+| `IERC20.sol` | Standard ERC20 + IWETH (deposit/withdraw) |
+| `IUniswapV2.sol` | Pair (swap, getReserves), Router, Factory |
+| `IUniswapV3.sol` | Pool (swap, slot0, observe), Factory, SwapRouter, QuoterV2 |
+
+### Deploy & Test
 
 ```bash
 cd contracts
-forge build
-forge test -vvv
+forge build                  # Compile all
+forge test -vvv              # 14 tests — access control (6), callback (3), fuzz (1), invariant (1), pause, edge cases
+forge test --gas-report      # Per-function gas usage
+forge script script/DeployArbitrum.s.sol:DeployArbitrumSepolia --rpc-url $RPC --broadcast   # Testnet deploy
+```
+
+### Folder Structure
+
+```
+contracts/
+├── src/
+│   ├── FlashArbitrage.sol      # Flash loan + multi-DEX execution
+│   ├── MultiDexRouter.sol      # Direct pool routing + packed calldata
+│   ├── interfaces/             # IBalancerVault, IERC20, IUniswapV2, IUniswapV3
+│   └── libraries/
+│       └── YulUtils.sol        # Pure Yul assembly: math, memory, hashing, calldata, AMM
+├── test/
+│   ├── FlashArbitrage.t.sol    # Foundry test suite (14 tests)
+│   └── MultiDexRouter.t.sol    # Router tests
+├── script/
+│   ├── Deploy.s.sol            # Generic deploy script
+│   └── DeployArbitrum.s.sol    # Arbitrum Sepolia + Mainnet deploy
+└── foundry.toml                # Optimizer: 10000 runs, via-ir enabled
 ```
 
 ---
@@ -424,9 +496,15 @@ mev-engineering-stack/
 │   ├── cmd/testnet-verify/ # Testnet signing verification tool
 │   ├── internal/           # block, gas, mempool, pipeline, relay, rpc, metrics
 │   └── pkg/                # config, types (public packages)
-├── contracts/              # Solidity — FlashArbitrage, MultiDexRouter
-│   ├── src/                # Contract source + interfaces
-│   └── test/               # Foundry test suite
+├── contracts/              # Solidity + Yul — flash arbitrage, multi-DEX routing
+│   ├── src/
+│   │   ├── FlashArbitrage.sol    # Balancer V2 flash loan (0% fee), 5-field callback hardening, inline Yul ERC20
+│   │   ├── MultiDexRouter.sol    # Direct pool calls (V2/V3/Sushi), packed calldata encoding
+│   │   ├── libraries/
+│   │   │   └── YulUtils.sol      # Pure Yul assembly: mulDiv, sqrt, getAmountOut, hash2, calldata parsing (15+ fns)
+│   │   └── interfaces/           # IBalancerVault, IERC20/IWETH, IUniswapV2, IUniswapV3
+│   ├── test/                     # Foundry: 14 tests (access control, callback, fuzz, invariant)
+│   └── script/                   # Deploy: Arbitrum Sepolia + Mainnet
 ├── fast/                   # C — SIMD keccak, RLP, lock-free queue, memory pool
 │   ├── src/                # Implementation (6 files)
 │   ├── include/            # Headers
