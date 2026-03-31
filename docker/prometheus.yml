@@ -1,12 +1,19 @@
+# MEV Protocol — Prometheus scrape configuration
+#
+# Scrapes metrics from both pipeline services every 15s.
+# Add alerting rules in a separate alerts.yml when ready for production.
+
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 15s       # how often to pull metrics from targets
+  evaluation_interval: 15s   # how often to evaluate recording/alerting rules
 
 scrape_configs:
+  # Rust core engine — exposes pipeline latency, detection counts, pool cache stats
   - job_name: 'mev-engine'
     static_configs:
       - targets: ['mev-engine:9090']
-    
+
+  # Go network node — exposes RPC latency, mempool throughput, relay submission stats
   - job_name: 'mev-node'
     static_configs:
       - targets: ['mev-node:9091']

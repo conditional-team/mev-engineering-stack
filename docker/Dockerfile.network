@@ -1,36 +1,41 @@
-# MEV Protocol - Go Network Image
+# MEV Protocol — Go Network Node
+#
+# Multi-stage build: compile with CGO_ENABLED=0 for a fully static binary
+# → copy to minimal Alpine runtime (~15 MB final image).
+#
+# Build:  docker build -f docker/Dockerfile.network -t mev-node .
+# Run:    docker run --env-file config/.env mev-node
+
+# ── Stage 1: Build ───────────────────────────────────────────────────
 FROM golang:1.21-alpine as builder
 
 WORKDIR /build
 
-# Install dependencies
+# gcc + musl-dev needed for any cgo dependencies during `go mod download`
 RUN apk add --no-cache gcc musl-dev
 
-# Copy source
 COPY network/ ./
 
-# Download dependencies
 RUN go mod download
 
-# Build
+# Static binary: no libc dependency, safe for scratch/alpine/distroless
 RUN CGO_ENABLED=0 go build -ldflags="-w -s" -o mev-node ./cmd/mev-node
 
-# Runtime image
+# ── Stage 2: Runtime ─────────────────────────────────────────────────
 FROM alpine:3.19
 
 WORKDIR /app
 
-# Install CA certificates
+# TLS certificates for HTTPS RPC and relay connections
 RUN apk add --no-cache ca-certificates
 
-# Copy binary
 COPY --from=builder /build/mev-node /app/
 
-# Create non-root user
+# Run as non-root user (UID 1000) to limit blast radius
 RUN adduser -D -u 1000 mev
 USER mev
 
-# Health check
+# Liveness check: verify the process is running
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD pgrep mev-node || exit 1
 

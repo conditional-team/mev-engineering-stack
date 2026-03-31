@@ -1,6 +1,29 @@
 version: "3.9"
 
+# MEV Protocol — Multi-service deployment
+#
+# Services:
+#   mev-engine  — Rust core (detection, simulation, bundle construction)
+#   mev-node    — Go network layer (mempool monitor, relay, pipeline)
+#   prometheus  — Metrics collection (scrapes both services)
+#   grafana     — Dashboards and alerting (port 3000)
+#
+# Usage:
+#   docker compose up -d          # start all services
+#   docker compose logs -f        # follow logs
+#   docker compose down            # stop and remove
+#
+# Metrics endpoints:
+#   mev-engine  → :9090/metrics
+#   mev-node    → :9091/metrics
+#   grafana     → :3000 (admin/mev_admin)
+
 services:
+  # ── Rust MEV Core Engine ───────────────────────────────────────────
+  # Runs detection, revm simulation, and bundle construction.
+  # Exposes gRPC on port 50051 for the Go node to connect.
+  # Resource limits: 4 CPU / 4 GB — sized for parallel detector workers
+  # and revm simulation. Tune down for development.
   mev-engine:
     build:
       context: .
@@ -11,19 +34,23 @@ services:
       - MEV_CONFIG=/app/config/config.json
       - LOG_LEVEL=info
     volumes:
-      - ./config:/app/config:ro
-      - ./logs:/app/logs
+      - ./config:/app/config:ro       # read-only config mount
+      - ./logs:/app/logs               # persistent log output
     networks:
       - mev-network
     deploy:
       resources:
         limits:
-          cpus: '4'
-          memory: 4G
+          cpus: '4'                    # match MEV_PIPELINE_WORKERS
+          memory: 4G                   # revm + pool cache headroom
         reservations:
           cpus: '2'
           memory: 2G
 
+  # ── Go Network Node ────────────────────────────────────────────────
+  # Monitors mempool via WebSocket, classifies transactions, and
+  # submits bundles through Flashbots/bloXroute relays.
+  # Depends on mev-engine for gRPC detection pipeline.
   mev-node:
     build:
       context: .
@@ -38,8 +65,11 @@ services:
     networks:
       - mev-network
     depends_on:
-      - mev-engine
+      - mev-engine                     # wait for gRPC server to be available
 
+  # ── Prometheus ─────────────────────────────────────────────────────
+  # Scrapes metrics from both services every 15s.
+  # Data persisted in named volume for restart survival.
   prometheus:
     image: prom/prometheus:v2.48.0
     container_name: mev-prometheus
@@ -52,6 +82,9 @@ services:
     networks:
       - mev-network
 
+  # ── Grafana ────────────────────────────────────────────────────────
+  # Visualization dashboards. Access at http://localhost:3000
+  # Default credentials: admin / mev_admin (change in production).
   grafana:
     image: grafana/grafana:10.2.2
     container_name: mev-grafana
@@ -59,18 +92,21 @@ services:
       - grafana_data:/var/lib/grafana
       - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=mev_admin
+      - GF_SECURITY_ADMIN_PASSWORD=mev_admin   # override in production
     ports:
-      - "3000:3000"
+      - "3000:3000"                            # exposed to host
     networks:
       - mev-network
     depends_on:
       - prometheus
 
+# All services communicate over this internal bridge network.
+# No ports are exposed to the host except Grafana (3000).
 networks:
   mev-network:
     driver: bridge
 
+# Named volumes persist data across container restarts.
 volumes:
   prometheus_data:
   grafana_data:
