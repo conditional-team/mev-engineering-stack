@@ -37,6 +37,7 @@ const version = "0.2.0"
 func main() {
 	// Setup structured logging
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05.000"})
 
 	log.Info().
