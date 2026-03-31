@@ -48,12 +48,22 @@ if ($Network -eq "mainnet") {
         Write-Host "  [!] ARBITRUM_WS_URL not set in .env" -ForegroundColor Red
         exit 1
     }
+    # Build multi-endpoint string (comma-separated)
+    $rpcEndpoints = $env:MEV_RPC_ENDPOINTS
+    if (-not $rpcEndpoints) {
+        $rpcEndpoints = $wsUrl
+        if ($env:ARBITRUM_WS_URL_2) { $rpcEndpoints += "," + $env:ARBITRUM_WS_URL_2 }
+        if ($env:ARBITRUM_WS_URL_3) { $rpcEndpoints += "," + $env:ARBITRUM_WS_URL_3 }
+    }
 } else {
     $wsUrl  = $env:ARBITRUM_WS_URL -replace "arb-mainnet", "arb-sepolia"
     $chain  = "Arbitrum Sepolia (421614)"
+    $rpcEndpoints = $wsUrl
 }
 
 Write-Host "  Network:    $chain" -ForegroundColor Yellow
+$epCount = ($rpcEndpoints -split ',').Count
+Write-Host "  RPC Pool:   $epCount endpoints" -ForegroundColor Yellow
 Write-Host "  Mode:       SIMULATION (read-only, no execution)" -ForegroundColor Green
 Write-Host "  Dashboard:  http://localhost — metrics on :9091" -ForegroundColor Gray
 Write-Host ""
@@ -81,22 +91,22 @@ Stop-Process -Name "mev_launcher" -Force -ErrorAction SilentlyContinue
 # ── Start Go node (metrics + dashboard backend) ─────────────────────────────
 Write-Host "  [>] Starting Go network node..." -ForegroundColor Cyan
 
-$env:MEV_RPC_ENDPOINTS   = $wsUrl
+$env:MEV_RPC_ENDPOINTS   = $rpcEndpoints
 $env:MEV_MEMPOOL_MIN_VALUE = "0"
 $env:MEV_MEMPOOL_FILTER   = "false"
 $env:MEV_METRICS_ENABLED  = "true"
 $env:MEV_METRICS_ADDR     = ":9091"
 
 $goJob = Start-Job -ScriptBlock {
-    param($networkDir, $wsUrl)
+    param($networkDir, $rpcEndpoints)
     Set-Location $networkDir
-    $env:MEV_RPC_ENDPOINTS    = $wsUrl
+    $env:MEV_RPC_ENDPOINTS    = $rpcEndpoints
     $env:MEV_MEMPOOL_MIN_VALUE = "0"
     $env:MEV_MEMPOOL_FILTER    = "false"
     $env:MEV_METRICS_ENABLED   = "true"
     $env:MEV_METRICS_ADDR      = ":9091"
     go run ./cmd/mev-node/ 2>&1
-} -ArgumentList (Join-Path $ROOT "network"), $wsUrl
+} -ArgumentList (Join-Path $ROOT "network"), $rpcEndpoints
 
 Start-Sleep -Seconds 3
 Write-Host "  [+] Go node started (PID: $($goJob.Id))" -ForegroundColor Green

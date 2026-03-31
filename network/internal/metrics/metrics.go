@@ -32,6 +32,13 @@ var (
 		Name:      "healthy_endpoints",
 		Help:      "Number of healthy RPC endpoints",
 	})
+
+	RPCTotalEndpoints = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "mev",
+		Subsystem: "rpc",
+		Name:      "total_endpoints",
+		Help:      "Total number of configured RPC endpoints",
+	})
 )
 
 // Mempool metrics

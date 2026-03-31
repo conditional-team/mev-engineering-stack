@@ -49,6 +49,9 @@ func NewPool(cfg Config) *Pool {
 func (p *Pool) Start(ctx context.Context) error {
 	log.Info().Int("endpoints", len(p.config.Endpoints)).Msg("Starting RPC pool")
 
+	// Track total configured endpoints
+	metrics.RPCTotalEndpoints.Set(float64(len(p.config.Endpoints)))
+
 	p.mu.Lock()
 	p.running = true
 	p.mu.Unlock()

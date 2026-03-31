@@ -47,6 +47,7 @@ type Watcher struct {
 	headerChan chan *Header
 	txChan     chan *mempool.PendingTx // block-based tx feed for chains without public mempool
 	latest     *Header
+	scanSem    chan struct{} // limits concurrent scanBlockTxs goroutines
 
 	mu      sync.RWMutex
 	running bool
@@ -60,6 +61,7 @@ func NewWatcher(cfg Config, pool *rpc.Pool) *Watcher {
 		rpcPool:    pool,
 		headerChan: make(chan *Header, cfg.BufferSize),
 		txChan:     make(chan *mempool.PendingTx, 10000),
+		scanSem:    make(chan struct{}, 4), // max 4 concurrent block fetches
 	}
 }
 
@@ -284,7 +286,11 @@ func (w *Watcher) handleHeader(ethHeader *types.Header) {
 // transaction decoder which chokes on Arbitrum's custom tx types 0x64/0x6a/0x6b)
 // and pushes every transaction to txChan.
 func (w *Watcher) scanBlockTxs(blockNumber uint64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Limit concurrent block fetches to avoid RPC saturation
+	w.scanSem <- struct{}{}
+	defer func() { <-w.scanSem }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	client, err := w.rpcPool.GetClient()

@@ -63,6 +63,44 @@ Sub-microsecond mempool monitoring, transaction classification, bundle construct
 
 ---
 
+## Live Dashboard
+
+Real-time monitoring dashboard polling Prometheus metrics every 2 seconds. Single self-contained HTML file — no build tools, no dependencies.
+
+```
+┌──────────────┬──────────────────────────────────────────────┬──────────────┐
+│  NETWORK     │        TRANSACTION PROCESSING PIPELINE       │  LIVE FEED   │
+│              │  Ingest → Classify → Filter → Opp → Relay   │  35 events   │
+│  Block #447M │         9.4K    9.4K   1.3K   1.3K   0      │              │
+│  RPC 3/3     │                                              │  PERFORMANCE │
+│  Propagation │        REVENUE & P&L           SESSION       │  40.7ns      │
+│  708ms       │        Total Extracted: 0.0000 ETH           │  425ns       │
+│              │                                              │  4 workers   │
+│  TX SOURCE   │        CLASSIFICATION BREAKDOWN              │              │
+│  Classified  │   V2: 26  V3: 360  Transfer: 920            │  ERRORS      │
+│  9.4K        │                                              │  0  0  0     │
+│              │        EIP-1559 GAS ORACLE   250ms           │              │
+│  Buffer 0%   │   Base: 0.02  Priority: 2.0  Pred: 0.017    │              │
+└──────────────┴──────────────────────────────────────────────┴──────────────┘
+```
+
+**Features:**
+- 3-column layout: Network stats, pipeline center, live feed + performance
+- Transaction Processing Pipeline with animated particle flow
+- Classification Breakdown (Swap V2, V3, Liquidation, Flash Loan, Transfer)
+- EIP-1559 Gas Oracle with base fee prediction gauges
+- Revenue & P&L tracking (session-scoped)
+- Multi-RPC health indicator (healthy / total endpoints)
+- Live event feed with color-coded OPP / BLOCK badges
+
+```bash
+# Open directly in browser
+open dashboard/index.html
+# Requires the Go node running with Prometheus on :9091
+```
+
+---
+
 ## Benchmark Results
 
 Measured with [Criterion 0.5](https://bheisler.github.io/criterion.rs/book/) on Intel i5-8250U @ 1.60GHz. Production targets co-located bare-metal.
@@ -322,6 +360,42 @@ Flags: `--key` (reuse signing key), `--rpc` (custom RPC), `--submit` (live submi
 
 ---
 
+## Fault Tolerance
+
+Every layer degrades gracefully. No panics, no silent failures.
+
+| Failure | Response | Recovery |
+|---------|----------|----------|
+| **RPC endpoint down** | Health check detects within 30s, routes to lowest-latency healthy client | Auto-failover to remaining endpoints |
+| **All RPCs unhealthy** | Falls back to first available client | Continues operating in degraded mode |
+| **WebSocket disconnects** | Logs error, sleeps 1s, reconnects automatically | Mempool monitor self-heals |
+| **WS subscription fails** | Block watcher falls back to HTTP polling (250ms interval) | Transparent — no data loss |
+| **Rust gRPC core offline** | Go node enters monitor-only mode — classifies without detection | Resumes full pipeline when core reconnects |
+| **C library missing** | Rust FFI auto-switches to pure-Rust fallbacks (keccak, RLP, price impact) | Compiles and runs without C toolchain |
+| **Pool cache cold** | Arbitrage detector uses `estimate_cross_dex_prices()` with typical reserves | Bootstraps until live data populates cache |
+| **Block fetch overload** | Semaphore limits to 4 concurrent goroutines, 10s timeout | Prevents RPC saturation on fast chains |
+| **Primary relay fails** | Multi-relay manager tries fallback relays sequentially | Race / Primary+Fallback / All strategies |
+| **Config missing** | `envString(key, fallback)` pattern on every variable | Sensible defaults — never crashes on missing env |
+
+---
+
+## MEV Ethics
+
+This stack extracts **constructive MEV only**:
+
+| Type | Status | Impact |
+|------|--------|--------|
+| **Arbitrage** | ✅ Supported | Aligns prices across DEXs — improves market efficiency |
+| **Backrun** | ✅ Supported | Captures residual slippage after large swaps — no victim |
+| **Liquidation** | ✅ Supported | Closes undercollateralized positions — maintains protocol solvency |
+| **Sandwich attack** | ❌ Not implemented | Front-run + back-run a victim to steal slippage — predatory |
+| **Front-running** | ❌ Not implemented | Copy and front-run pending transactions — predatory |
+| **JIT liquidity** | ❌ Not implemented | Temporary liquidity manipulation — market distortion |
+
+> All detected opportunities are non-predatory. No user transactions are harmed, front-run, or sandwiched.
+
+---
+
 ## Project Structure
 
 ```
@@ -362,3 +436,27 @@ mev-engineering-stack/
 ## License
 
 Proprietary. See [LICENSE](LICENSE) for details.
+
+---
+
+## ⚠️ Disclaimer — Simulation Mode
+
+This stack runs in **simulation mode**: it scans Arbitrum mainnet in real-time, classifies transactions, and detects MEV opportunities — but **does not submit bundles or execute trades**.
+
+### What's Live Now
+- ✅ Real-time block scanning on Arbitrum One (mainnet)
+- ✅ Transaction classification at 40.7 ns/op (24.5M tx/sec theoretical)
+- ✅ Opportunity detection (arbitrage, backrun, liquidation)
+- ✅ EIP-1559 gas oracle with prediction
+- ✅ Multi-RPC pool with health checks and failover
+- ✅ Prometheus metrics + live dashboard
+
+### What's Needed for Live Execution
+- 🔲 **Security audit** — formal verification of flash loan callback logic
+- 🔲 **Flashbots relay integration** — `eth_sendBundle` to block builders (Flashbots Protect, MEV Blocker, Merkle)
+- 🔲 **Contract deployment** — `FlashArbitrage.sol` + `MultiDexRouter.sol` on Arbitrum One
+- 🔲 **Co-located infrastructure** — bare-metal node with sub-ms latency to the Arbitrum sequencer
+- 🔲 **Capital** — ETH for gas + working capital for profitable flash arbitrage
+- 🔲 **Monitoring & alerting** — failed bundle detection, gas spike alerts, profit degradation tracking
+
+> The architecture is designed for production MEV extraction. The simulation layer proves the pipeline end-to-end on real mainnet data before committing capital.
