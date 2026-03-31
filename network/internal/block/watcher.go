@@ -2,10 +2,15 @@ package block
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"math/big"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/mev-protocol/network/internal/mempool"
 	"github.com/mev-protocol/network/internal/metrics"
@@ -275,7 +280,9 @@ func (w *Watcher) handleHeader(ethHeader *types.Header) {
 	go w.scanBlockTxs(header.Number)
 }
 
-// scanBlockTxs fetches the full block and pushes every transaction to txChan.
+// scanBlockTxs fetches the full block via raw JSON-RPC (bypasses go-ethereum's
+// transaction decoder which chokes on Arbitrum's custom tx types 0x64/0x6a/0x6b)
+// and pushes every transaction to txChan.
 func (w *Watcher) scanBlockTxs(blockNumber uint64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -286,43 +293,87 @@ func (w *Watcher) scanBlockTxs(blockNumber uint64) {
 		return
 	}
 
-	block, err := client.BlockByNumber(ctx, new(big.Int).SetUint64(blockNumber))
+	// Use raw JSON-RPC to avoid "transaction type not supported" from go-ethereum
+	var raw json.RawMessage
+	hexBlock := fmt.Sprintf("0x%x", blockNumber)
+	rpcClient := client.Client.Client()
+	err = rpcClient.CallContext(ctx, &raw, "eth_getBlockByNumber", hexBlock, true)
 	if err != nil {
-		log.Warn().Err(err).Uint64("block", blockNumber).Msg("Failed to fetch block body")
+		log.Warn().Err(err).Uint64("block", blockNumber).Msg("Failed to fetch block body (raw)")
 		return
 	}
 
-	txs := block.Transactions()
-	if len(txs) == 0 {
+	var blockData struct {
+		Transactions []rawTx `json:"transactions"`
+	}
+	if err := json.Unmarshal(raw, &blockData); err != nil {
+		log.Warn().Err(err).Uint64("block", blockNumber).Msg("Failed to parse block JSON")
 		return
 	}
 
-	chainID := txs[0].ChainId()
-	signer := types.LatestSignerForChainID(chainID)
+	if len(blockData.Transactions) == 0 {
+		return
+	}
 
-	for _, tx := range txs {
-		ptx := &mempool.PendingTx{
-			Hash:      tx.Hash(),
-			To:        tx.To(),
-			Value:     tx.Value().Uint64(),
-			GasPrice:  tx.GasPrice().Uint64(),
-			GasLimit:  tx.Gas(),
-			Input:     tx.Data(),
-			Nonce:     tx.Nonce(),
-			Timestamp: time.Now(),
+	for _, rtx := range blockData.Transactions {
+		ptx := rtx.toPendingTx()
+		if ptx == nil {
+			continue
 		}
-		if from, err := types.Sender(signer, tx); err == nil {
-			ptx.From = from
-		}
-
 		select {
 		case w.txChan <- ptx:
 		default:
-			// channel full — skip remaining txs from this block
-			log.Warn().Uint64("block", blockNumber).Int("dropped", len(txs)).Msg("Block tx channel full")
+			log.Warn().Uint64("block", blockNumber).Int("dropped", len(blockData.Transactions)).Msg("Block tx channel full")
 			return
 		}
 	}
 
-	log.Info().Uint64("block", blockNumber).Int("txs", len(txs)).Msg("Block txs fed to pipeline")
+	log.Info().Uint64("block", blockNumber).Int("txs", len(blockData.Transactions)).Msg("Block txs fed to pipeline")
+}
+
+// rawTx is a minimal representation of a transaction from eth_getBlockByNumber JSON.
+type rawTx struct {
+	Hash     string `json:"hash"`
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Value    string `json:"value"`
+	Gas      string `json:"gas"`
+	GasPrice string `json:"gasPrice"`
+	Input    string `json:"input"`
+	Nonce    string `json:"nonce"`
+}
+
+func (r *rawTx) toPendingTx() *mempool.PendingTx {
+	if r.Hash == "" {
+		return nil
+	}
+	ptx := &mempool.PendingTx{
+		Hash:      common.HexToHash(r.Hash),
+		Timestamp: time.Now(),
+	}
+	if r.From != "" {
+		from := common.HexToAddress(r.From)
+		ptx.From = from
+	}
+	if r.To != "" {
+		to := common.HexToAddress(r.To)
+		ptx.To = &to
+	}
+	ptx.Value = parseHexUint64(r.Value)
+	ptx.GasPrice = parseHexUint64(r.GasPrice)
+	ptx.GasLimit = parseHexUint64(r.Gas)
+	ptx.Nonce = parseHexUint64(r.Nonce)
+	if r.Input != "" && r.Input != "0x" {
+		ptx.Input = common.FromHex(r.Input)
+	}
+	return ptx
+}
+
+func parseHexUint64(s string) uint64 {
+	s = strings.TrimPrefix(s, "0x")
+	if s == "" {
+		return 0
+	}
+	v, _ := strconv.ParseUint(s, 16, 64)
+	return v
 }

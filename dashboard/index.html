@@ -170,17 +170,16 @@
             display: grid;
             grid-template-columns: 280px 1fr 280px;
             gap: 0;
-            min-height: calc(100vh - 52px);
-            overflow-y: auto;
-            overflow-x: hidden;
+            height: calc(100vh - 52px);
+            overflow: hidden;
         }
 
         /* ═══ PANELS ═══ */
         .panel-left, .panel-right {
-            padding: 16px;
+            padding: 14px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 10px;
             border-right: 1px solid var(--border);
             overflow-y: auto;
             overflow-x: hidden;
@@ -201,7 +200,7 @@
             background: var(--bg-1);
             border: 1px solid var(--border);
             border-radius: 10px;
-            padding: 14px 16px;
+            padding: 12px 14px;
             position: relative;
             overflow: hidden;
             transition: border-color 0.3s;
@@ -226,7 +225,7 @@
         }
 
         .tile-value {
-            font-size: 26px;
+            font-size: 22px;
             font-weight: 700;
             line-height: 1.1;
             font-variant-numeric: tabular-nums;
@@ -243,8 +242,8 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            padding: 20px;
-            gap: 20px;
+            padding: 16px;
+            gap: 16px;
             overflow-y: auto;
             overflow-x: hidden;
         }
@@ -255,7 +254,7 @@
             background: var(--bg-1);
             border: 1px solid var(--border);
             border-radius: 14px;
-            padding: 24px;
+            padding: 18px;
             overflow: hidden;
             position: relative;
         }
@@ -378,7 +377,7 @@
             background: var(--bg-1);
             border: 1px solid var(--border);
             border-radius: 10px;
-            padding: 14px;
+            padding: 10px;
             text-align: center;
             transition: all 0.3s;
             position: relative;
@@ -399,9 +398,9 @@
         .class-item.transfer::before { background: var(--orange); }
         .class-item.unknown::before { background: var(--text-2); }
 
-        .class-icon { font-size: 20px; margin-bottom: 6px; }
+        .class-icon { font-size: 18px; margin-bottom: 4px; }
         .class-name { font-size: 10px; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.5px; }
-        .class-count { font-size: 22px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+        .class-count { font-size: 20px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
         .class-pct { font-size: 10px; color: var(--text-2); }
 
         /* ═══ GAS GAUGES ═══ */
@@ -410,7 +409,7 @@
             background: var(--bg-1);
             border: 1px solid var(--border);
             border-radius: 14px;
-            padding: 24px;
+            padding: 18px;
         }
 
         .gas-header {
@@ -435,7 +434,7 @@
         }
 
         .gauge-ring {
-            width: 90px; height: 90px;
+            width: 80px; height: 80px;
             position: relative;
         }
 
@@ -488,13 +487,13 @@
 
         /* ═══ LIVE FEED ═══ */
         .feed {
-            flex: 1;
             background: var(--bg-1);
             border: 1px solid var(--border);
             border-radius: 10px;
             overflow: hidden;
             display: flex;
             flex-direction: column;
+            max-height: 40vh;
         }
 
         .feed-header {
@@ -603,9 +602,14 @@
         @media (max-width: 1400px) {
             .main { grid-template-columns: 240px 1fr 240px; }
         }
-        @media (max-width: 1200px) {
-            .main { grid-template-columns: 1fr 1fr; }
+        @media (max-width: 1100px) {
+            .main {
+                grid-template-columns: 1fr 1fr;
+                height: auto;
+                min-height: calc(100vh - 52px);
+            }
             .panel-right { grid-column: 1 / -1; }
+            .feed { max-height: 300px; }
         }
         @media (max-width: 768px) {
             .main { grid-template-columns: 1fr; }
