@@ -18,22 +18,16 @@ fn main() {
     if proto_path.exists() {
         println!("cargo:rerun-if-changed={}", proto_path.display());
 
-        // Only compile proto if protoc is available
-        let has_protoc = std::process::Command::new("protoc")
-            .arg("--version")
-            .output()
-            .is_ok();
+        let protoc = protoc_bin_vendored::protoc_bin_path()
+            .expect("Failed to locate vendored protoc");
+        env::set_var("PROTOC", protoc);
 
-        if has_protoc {
-            tonic_build::configure()
-                .build_server(true)
-                .build_client(true)
-                .out_dir("src/grpc")
-                .compile(&[&proto_path], &[proto_path.parent().unwrap()])
-                .expect("Failed to compile proto");
-        } else {
-            println!("cargo:warning=protoc not found — using pre-generated gRPC code");
-        }
+        tonic_build::configure()
+            .build_server(true)
+            .build_client(true)
+            .out_dir("src/grpc")
+            .compile(&[&proto_path], &[proto_path.parent().unwrap()])
+            .expect("Failed to compile proto");
     }
 
     // ── C hot path compilation (optional — gracefully skip on failure) ──

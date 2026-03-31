@@ -17,14 +17,32 @@ import (
 
 // Node holds all configuration for the MEV node
 type Node struct {
-	RPC      rpc.Config
-	Mempool  mempool.Config
-	Relay    relay.Config
-	Block    block.Config
-	Gas      gas.Config
-	Pipeline pipeline.Config
-	Multi    relay.MultiConfig
-	Metrics  MetricsConfig
+	RPC       rpc.Config
+	Mempool   mempool.Config
+	Relay     relay.Config
+	Block     block.Config
+	Gas       gas.Config
+	Pipeline  pipeline.Config
+	Multi     relay.MultiConfig
+	Execution ExecutionConfig
+	Metrics   MetricsConfig
+}
+
+type ExecutionMode string
+
+const (
+	ExecutionModeSimulate ExecutionMode = "simulate"
+	ExecutionModeLive     ExecutionMode = "live"
+)
+
+type ExecutionConfig struct {
+	Mode       ExecutionMode
+	PrivateKey string
+	ChainID    uint64
+}
+
+func (e ExecutionConfig) Live() bool {
+	return e.Mode == ExecutionModeLive
 }
 
 // MetricsConfig for Prometheus endpoint
@@ -43,7 +61,23 @@ func Load() (*Node, error) {
 		return nil, fmt.Errorf("MEV_RPC_ENDPOINTS: at least one endpoint required")
 	}
 
+	mode := ExecutionMode(strings.ToLower(envString("EXECUTE_MODE", string(ExecutionModeSimulate))))
+	switch mode {
+	case ExecutionModeSimulate, ExecutionModeLive:
+	default:
+		return nil, fmt.Errorf("EXECUTE_MODE: must be %q or %q", ExecutionModeSimulate, ExecutionModeLive)
+	}
+
+	privateKey := os.Getenv("PRIVATE_KEY")
 	signingKey := os.Getenv("FLASHBOTS_SIGNING_KEY")
+	if mode == ExecutionModeLive {
+		if privateKey == "" {
+			return nil, fmt.Errorf("PRIVATE_KEY required when EXECUTE_MODE=live")
+		}
+		if signingKey == "" {
+			return nil, fmt.Errorf("FLASHBOTS_SIGNING_KEY required when EXECUTE_MODE=live")
+		}
+	}
 
 	return &Node{
 		RPC: rpc.Config{
@@ -96,6 +130,11 @@ func Load() (*Node, error) {
 			RequireSimulation: envBool("MEV_RELAY_REQUIRE_SIM", true),
 			MinProfitWei:      int64(envInt("MEV_RELAY_MIN_PROFIT", 1000000000000000)), // 0.001 ETH
 		},
+		Execution: ExecutionConfig{
+			Mode:       mode,
+			PrivateKey: privateKey,
+			ChainID:    envUint64("MEV_CHAIN_ID", 42161),
+		},
 		Metrics: MetricsConfig{
 			Enabled: envBool("MEV_METRICS_ENABLED", true),
 			Addr:    envString("MEV_METRICS_ADDR", ":9090"),
@@ -115,6 +154,15 @@ func envString(key, fallback string) string {
 func envInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return fallback
+}
+
+func envUint64(key string, fallback uint64) uint64 {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.ParseUint(v, 10, 64); err == nil {
 			return i
 		}
 	}

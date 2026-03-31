@@ -95,6 +95,7 @@ impl BundleBuilder {
         opportunity: &Opportunity,
         contract: &str,
     ) -> anyhow::Result<Vec<BundleTransaction>> {
+        self.validate_swap_opportunity(opportunity)?;
         let swap_path = self.encode_swap_path(opportunity)?;
 
         let calldata = encode_arbitrage_call(
@@ -121,6 +122,7 @@ impl BundleBuilder {
         opportunity: &Opportunity,
         contract: &str,
     ) -> anyhow::Result<Vec<BundleTransaction>> {
+        self.validate_swap_opportunity(opportunity)?;
         let swap_path = self.encode_swap_path(opportunity)?;
 
         let calldata = encode_backrun_call(
@@ -169,6 +171,8 @@ impl BundleBuilder {
     ///
     /// Wire format per hop: [dex_type:1][pool_address:20][fee:3]
     fn encode_swap_path(&self, opportunity: &Opportunity) -> anyhow::Result<Vec<u8>> {
+        self.validate_swap_opportunity(opportunity)?;
+
         let path = &opportunity.path;
         let pool_addresses = &opportunity.pool_addresses;
         let pool_fees = &opportunity.pool_fees;
@@ -184,20 +188,11 @@ impl BundleBuilder {
                 DexType::Balancer   => DEX_BALANCER,
             };
 
-            // Use real pool address if available, otherwise zero (will fail on-chain — must be filled)
-            let pool_addr = pool_addresses.get(i).copied().unwrap_or([0u8; 20]);
-            if pool_addr == [0u8; 20] {
-                tracing::warn!(hop = i, dex = ?dex, "Pool address not resolved — bundle may fail on-chain");
-            }
+            // Safe due to validate_swap_opportunity() length checks.
+            let pool_addr = pool_addresses[i];
 
             // Use per-hop fee if available, otherwise derive from DEX type
-            let fee = pool_fees.get(i).copied().unwrap_or(match dex {
-                DexType::UniswapV2  => 3000,
-                DexType::UniswapV3  => 500,
-                DexType::SushiSwap  => 3000,
-                DexType::Curve      => 4,
-                DexType::Balancer   => 0,
-            });
+            let fee = pool_fees.get(i).copied().unwrap_or(default_fee_for_dex(dex));
             let fee_bytes = [
                 ((fee >> 16) & 0xFF) as u8,
                 ((fee >> 8) & 0xFF) as u8,
@@ -210,6 +205,56 @@ impl BundleBuilder {
         }
 
         Ok(data)
+    }
+
+    /// Validate path metadata for swap-based opportunities (arb/backrun).
+    fn validate_swap_opportunity(&self, opportunity: &Opportunity) -> anyhow::Result<()> {
+        let path = &opportunity.path;
+        let pool_addresses = &opportunity.pool_addresses;
+        let pool_fees = &opportunity.pool_fees;
+
+        if path.is_empty() {
+            return Err(anyhow::anyhow!("swap path is empty"));
+        }
+
+        if pool_addresses.len() != path.len() {
+            return Err(anyhow::anyhow!(
+                "pool address count mismatch: path has {} hops, pool_addresses has {} entries",
+                path.len(),
+                pool_addresses.len()
+            ));
+        }
+
+        if !pool_fees.is_empty() && pool_fees.len() != path.len() {
+            return Err(anyhow::anyhow!(
+                "pool fee count mismatch: path has {} hops, pool_fees has {} entries",
+                path.len(),
+                pool_fees.len()
+            ));
+        }
+
+        for (i, dex) in path.iter().enumerate() {
+            let pool_addr = pool_addresses[i];
+            if pool_addr == [0u8; 20] {
+                return Err(anyhow::anyhow!(
+                    "pool address not resolved for hop {} ({:?})",
+                    i,
+                    dex
+                ));
+            }
+
+            let fee = pool_fees.get(i).copied().unwrap_or(default_fee_for_dex(dex));
+            if !is_valid_fee_for_dex(dex, fee) {
+                return Err(anyhow::anyhow!(
+                    "invalid fee {} for hop {} ({:?})",
+                    fee,
+                    i,
+                    dex
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn count(&self) -> u64 {
@@ -303,6 +348,25 @@ fn abi_encode_u256(val: u128) -> [u8; 32] {
     let mut word = [0u8; 32];
     word[16..32].copy_from_slice(&val.to_be_bytes());
     word
+}
+
+fn default_fee_for_dex(dex: &DexType) -> u32 {
+    match dex {
+        DexType::UniswapV2 => 3000,
+        DexType::UniswapV3 => 500,
+        DexType::SushiSwap => 3000,
+        DexType::Curve => 4,
+        DexType::Balancer => 0,
+    }
+}
+
+fn is_valid_fee_for_dex(dex: &DexType, fee: u32) -> bool {
+    match dex {
+        DexType::UniswapV2 | DexType::SushiSwap => fee == 3000,
+        DexType::UniswapV3 => matches!(fee, 100 | 500 | 3000 | 10000),
+        DexType::Curve => (1..=10_000).contains(&fee),
+        DexType::Balancer => fee <= 10_000,
+    }
 }
 
 #[cfg(test)]
@@ -521,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_swap_path_empty() {
+    fn test_encode_swap_path_empty_fails() {
         let config = Arc::new(Config::default());
         let builder = BundleBuilder::new(config);
 
@@ -538,12 +602,12 @@ mod tests {
             pool_fees: vec![],
             target_tx: None,
         };
-        let encoded = builder.encode_swap_path(&opp).unwrap();
-        assert_eq!(encoded.len(), 0, "empty path should produce empty bytes");
+        let result = builder.encode_swap_path(&opp);
+        assert!(result.is_err(), "empty path must fail validation");
     }
 
     #[test]
-    fn test_encode_swap_path_missing_pool_uses_zeros() {
+    fn test_encode_swap_path_missing_pool_fails() {
         let config = Arc::new(Config::default());
         let builder = BundleBuilder::new(config);
 
@@ -560,11 +624,54 @@ mod tests {
             pool_fees: vec![],
             target_tx: None,
         };
-        let encoded = builder.encode_swap_path(&opp).unwrap();
-        assert_eq!(encoded.len(), 24);
-        assert_eq!(encoded[0], DEX_UNISWAP_V2);
-        // Pool address should be zeros (fallback)
-        assert_eq!(&encoded[1..21], &[0u8; 20]);
+        let result = builder.encode_swap_path(&opp);
+        assert!(result.is_err(), "missing pool metadata must fail validation");
+    }
+
+    #[test]
+    fn test_encode_swap_path_invalid_v3_fee_fails() {
+        let config = Arc::new(Config::default());
+        let builder = BundleBuilder::new(config);
+
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Arbitrage,
+            token_in: "0xdead".to_string(),
+            token_out: "0xbeef".to_string(),
+            amount_in: 1_000_000_000_000_000_000,
+            expected_profit: 0,
+            gas_estimate: 250_000,
+            deadline: 0,
+            path: vec![DexType::UniswapV3],
+            pool_addresses: vec![[0x11; 20]],
+            pool_fees: vec![2500],
+            target_tx: None,
+        };
+
+        let result = builder.encode_swap_path(&opp);
+        assert!(result.is_err(), "invalid UniswapV3 fee tier must fail validation");
+    }
+
+    #[test]
+    fn test_encode_swap_path_fee_count_mismatch_fails() {
+        let config = Arc::new(Config::default());
+        let builder = BundleBuilder::new(config);
+
+        let opp = Opportunity {
+            opportunity_type: OpportunityType::Arbitrage,
+            token_in: "0xdead".to_string(),
+            token_out: "0xbeef".to_string(),
+            amount_in: 1_000_000_000_000_000_000,
+            expected_profit: 0,
+            gas_estimate: 250_000,
+            deadline: 0,
+            path: vec![DexType::UniswapV2, DexType::UniswapV3],
+            pool_addresses: vec![[0xAA; 20], [0xBB; 20]],
+            pool_fees: vec![3000],
+            target_tx: None,
+        };
+
+        let result = builder.encode_swap_path(&opp);
+        assert!(result.is_err(), "pool fee count mismatch must fail validation");
     }
 
     #[test]

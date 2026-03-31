@@ -9,6 +9,8 @@ func TestLoad_Defaults(t *testing.T) {
 	// Clear any env vars that might interfere
 	os.Unsetenv("MEV_RPC_ENDPOINTS")
 	os.Unsetenv("FLASHBOTS_SIGNING_KEY")
+	os.Unsetenv("PRIVATE_KEY")
+	os.Unsetenv("EXECUTE_MODE")
 
 	cfg, err := Load()
 	if err != nil {
@@ -45,6 +47,14 @@ func TestLoad_Defaults(t *testing.T) {
 
 	if cfg.Metrics.Addr != ":9090" {
 		t.Errorf("expected metrics addr :9090, got %s", cfg.Metrics.Addr)
+	}
+
+	if cfg.Execution.Mode != ExecutionModeSimulate {
+		t.Errorf("expected simulate mode by default, got %s", cfg.Execution.Mode)
+	}
+
+	if cfg.Execution.ChainID != 42161 {
+		t.Errorf("expected default chain id 42161, got %d", cfg.Execution.ChainID)
 	}
 }
 
@@ -141,5 +151,47 @@ func TestEnvBool(t *testing.T) {
 	}
 	if envBool("TEST_BOOL_MISSING", false) {
 		t.Error("expected fallback false for missing")
+	}
+}
+
+func TestLoad_InvalidExecutionMode(t *testing.T) {
+	os.Setenv("EXECUTE_MODE", "turbo")
+	defer os.Unsetenv("EXECUTE_MODE")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected invalid EXECUTE_MODE to fail")
+	}
+}
+
+func TestLoad_LiveModeRequiresKeys(t *testing.T) {
+	os.Setenv("EXECUTE_MODE", "live")
+	os.Unsetenv("PRIVATE_KEY")
+	os.Unsetenv("FLASHBOTS_SIGNING_KEY")
+	defer os.Unsetenv("EXECUTE_MODE")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected live mode without keys to fail")
+	}
+}
+
+func TestLoad_LiveModeWithKeys(t *testing.T) {
+	os.Setenv("EXECUTE_MODE", "live")
+	os.Setenv("PRIVATE_KEY", "deadbeef")
+	os.Setenv("FLASHBOTS_SIGNING_KEY", "cafebabe")
+	defer func() {
+		os.Unsetenv("EXECUTE_MODE")
+		os.Unsetenv("PRIVATE_KEY")
+		os.Unsetenv("FLASHBOTS_SIGNING_KEY")
+	}()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected live mode config to load: %v", err)
+	}
+
+	if cfg.Execution.Mode != ExecutionModeLive {
+		t.Fatalf("expected live mode, got %s", cfg.Execution.Mode)
 	}
 }

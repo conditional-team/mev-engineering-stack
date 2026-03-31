@@ -23,9 +23,14 @@ path = "src/bin/scanner.rs"
 name = "benchmark"
 path = "src/bin/benchmark.rs"
 
+[[bin]]
+name = "grpc_server"
+path = "src/bin/grpc_server.rs"
+
 [build-dependencies]
 cc = "1.0"
 tonic-build = "0.11"
+protoc-bin-vendored = "3"
 
 [dependencies]
 # Environment

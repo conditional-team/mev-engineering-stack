@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tonic::{Request, Response, Status};
 use tracing::{info, debug, warn};
 
@@ -17,21 +17,41 @@ use crate::simulator::EvmSimulator;
 use crate::builder::BundleBuilder;
 use crate::types::{PendingTx, OpportunityType};
 
+/// Capacity for the broadcast channel used by StreamOpportunities.
+const BROADCAST_CAPACITY: usize = 256;
+
 /// gRPC server wrapping the full MEV pipeline
 pub struct MevGrpcServer {
     detector: Arc<OpportunityDetector>,
     simulator: Arc<EvmSimulator>,
     builder: Arc<BundleBuilder>,
     start_time: Instant,
+    /// Broadcast sender — every successful detection is published here
+    /// so that all StreamOpportunities subscribers receive it.
+    opportunity_tx: broadcast::Sender<mev::DetectionResult>,
 }
 
 impl MevGrpcServer {
     pub fn new(config: Arc<Config>) -> Self {
+        let (opportunity_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let mut builder = BundleBuilder::new(config.clone());
+
+        if let Some(contract_address) = config
+            .chains
+            .get(&42161)
+            .and_then(|chain| chain.contract_address.clone())
+        {
+            builder.set_contract(contract_address);
+        } else {
+            warn!("No contract address configured for chain 42161 — bundle building may fail");
+        }
+
         Self {
             detector: Arc::new(OpportunityDetector::new(config.clone())),
             simulator: Arc::new(EvmSimulator::new(config.clone())),
-            builder: Arc::new(BundleBuilder::new(config)),
+            builder: Arc::new(builder),
             start_time: Instant::now(),
+            opportunity_tx,
         }
     }
 
@@ -142,7 +162,7 @@ impl MevEngine for MevGrpcServer {
                                 data: tx.data.clone(),
                             }
                         }).collect(),
-                        target_block: bundle.target_block.unwrap_or(0),
+                        target_block: bundle.target_block.unwrap_or(proto_tx.target_block),
                     });
                 }
                 Err(e) => {
@@ -153,23 +173,68 @@ impl MevEngine for MevGrpcServer {
             proto_opps.push(proto_opp);
         }
 
-        Ok(Response::new(mev::DetectionResult {
+        let result = mev::DetectionResult {
             found: !proto_opps.is_empty(),
             opportunities: proto_opps,
             detection_latency_ns: start.elapsed().as_nanos() as u64,
-        }))
+        };
+
+        // Broadcast to StreamOpportunities subscribers (best-effort)
+        if result.found {
+            let _ = self.opportunity_tx.send(result.clone());
+        }
+
+        Ok(Response::new(result))
     }
 
-    /// Stream — subscribe to all detected opportunities.
-    /// For now a placeholder that returns an empty stream.
+    /// Stream — subscribe to all detected opportunities in real time.
+    /// Each subscriber receives every opportunity that passes simulation.
     type StreamOpportunitiesStream = tokio_stream::wrappers::ReceiverStream<Result<mev::DetectionResult, Status>>;
 
     async fn stream_opportunities(
         &self,
-        _request: Request<mev::StreamRequest>,
+        request: Request<mev::StreamRequest>,
     ) -> Result<Response<Self::StreamOpportunitiesStream>, Status> {
-        let (_tx, rx) = mpsc::channel(128);
-        // In production: spawn a task that feeds detected opportunities into tx
+        let min_profit = request.into_inner().min_profit;
+        let min_profit_u128 = if min_profit.is_empty() {
+            0u128
+        } else {
+            super::server::bytes_to_u128(&min_profit)
+        };
+
+        let (tx, rx) = mpsc::channel(128);
+        let mut broadcast_rx = self.opportunity_tx.subscribe();
+
+        // Spawn a task that forwards broadcast messages to this subscriber's stream
+        tokio::spawn(async move {
+            loop {
+                match broadcast_rx.recv().await {
+                    Ok(detection_result) => {
+                        // Apply optional min_profit filter
+                        if min_profit_u128 > 0 {
+                            let passes = detection_result.opportunities.iter().any(|opp| {
+                                let profit = bytes_to_u128(&opp.expected_profit);
+                                profit >= min_profit_u128
+                            });
+                            if !passes {
+                                continue;
+                            }
+                        }
+
+                        if tx.send(Ok(detection_result)).await.is_err() {
+                            // Subscriber disconnected
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(skipped = n, "StreamOpportunities subscriber lagged");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 

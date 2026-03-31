@@ -1,12 +1,14 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # MEV PROTOCOL — LIVE LAUNCHER
 # Single command: .\scripts\live.ps1
-# Starts: Go node (metrics) + Rust engine (simulation) + Dashboard
+# Starts: Rust gRPC core + Go node + Dashboard
 # ═══════════════════════════════════════════════════════════════════════════════
 
 param(
     [ValidateSet("mainnet","testnet")]
     [string]$Network = "mainnet",
+    [ValidateSet("simulate","live")]
+    [string]$ExecutionMode = "simulate",
     [switch]$NoDashboard,
     [switch]$BuildFirst
 )
@@ -64,7 +66,21 @@ if ($Network -eq "mainnet") {
 Write-Host "  Network:    $chain" -ForegroundColor Yellow
 $epCount = ($rpcEndpoints -split ',').Count
 Write-Host "  RPC Pool:   $epCount endpoints" -ForegroundColor Yellow
-Write-Host "  Mode:       SIMULATION (read-only, no execution)" -ForegroundColor Green
+if ($ExecutionMode -eq "live") {
+    Write-Host "  Mode:       LIVE (signed bundle submission enabled)" -ForegroundColor Red
+
+    # Fail fast on missing credentials required for relay submission.
+    if (-not $env:PRIVATE_KEY) {
+        Write-Host "  [!] PRIVATE_KEY is required when -ExecutionMode live" -ForegroundColor Red
+        exit 1
+    }
+    if (-not $env:FLASHBOTS_SIGNING_KEY) {
+        Write-Host "  [!] FLASHBOTS_SIGNING_KEY is required when -ExecutionMode live" -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "  Mode:       SIMULATION (read-only, no execution)" -ForegroundColor Green
+}
 Write-Host "  Dashboard:  http://localhost — metrics on :9091" -ForegroundColor Gray
 Write-Host ""
 
@@ -86,7 +102,26 @@ if ($BuildFirst) {
 
 # ── Kill old processes ───────────────────────────────────────────────────────
 Stop-Process -Name "mev-node" -Force -ErrorAction SilentlyContinue
-Stop-Process -Name "mev_launcher" -Force -ErrorAction SilentlyContinue
+Stop-Process -Name "grpc_server" -Force -ErrorAction SilentlyContinue
+
+# ── Start Rust core gRPC server ──────────────────────────────────────────────
+Write-Host "  [>] Starting Rust gRPC core..." -ForegroundColor Cyan
+
+$rustJob = Start-Job -ScriptBlock {
+    param($coreDir, $envFile)
+    Set-Location $coreDir
+    if (Test-Path $envFile) {
+        Get-Content $envFile | ForEach-Object {
+            if ($_ -match '^\s*([^#][^=]+?)\s*=\s*(.+?)\s*$') {
+                [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], "Process")
+            }
+        }
+    }
+    cargo run --release --bin grpc_server 2>&1
+} -ArgumentList (Join-Path $ROOT "core"), $envFile
+
+Start-Sleep -Seconds 3
+Write-Host "  [+] Rust core started (PID: $($rustJob.Id))" -ForegroundColor Green
 
 # ── Start Go node (metrics + dashboard backend) ─────────────────────────────
 Write-Host "  [>] Starting Go network node..." -ForegroundColor Cyan
@@ -96,43 +131,22 @@ $env:MEV_MEMPOOL_MIN_VALUE = "0"
 $env:MEV_MEMPOOL_FILTER   = "false"
 $env:MEV_METRICS_ENABLED  = "true"
 $env:MEV_METRICS_ADDR     = ":9091"
+$env:EXECUTE_MODE        = $ExecutionMode
 
 $goJob = Start-Job -ScriptBlock {
-    param($networkDir, $rpcEndpoints)
+    param($networkDir, $rpcEndpoints, $executionMode)
     Set-Location $networkDir
     $env:MEV_RPC_ENDPOINTS    = $rpcEndpoints
     $env:MEV_MEMPOOL_MIN_VALUE = "0"
     $env:MEV_MEMPOOL_FILTER    = "false"
     $env:MEV_METRICS_ENABLED   = "true"
     $env:MEV_METRICS_ADDR      = ":9091"
+    $env:EXECUTE_MODE         = $executionMode
     go run ./cmd/mev-node/ 2>&1
-} -ArgumentList (Join-Path $ROOT "network"), $rpcEndpoints
+} -ArgumentList (Join-Path $ROOT "network"), $rpcEndpoints, $ExecutionMode
 
 Start-Sleep -Seconds 3
 Write-Host "  [+] Go node started (PID: $($goJob.Id))" -ForegroundColor Green
-
-# ── Start Rust engine (simulation) ──────────────────────────────────────────
-Write-Host "  [>] Starting Rust MEV engine..." -ForegroundColor Cyan
-
-$env:EXECUTE_MODE = "simulate"
-
-$rustJob = Start-Job -ScriptBlock {
-    param($coreDir, $envFile)
-    Set-Location $coreDir
-    # Load .env into this process
-    if (Test-Path $envFile) {
-        Get-Content $envFile | ForEach-Object {
-            if ($_ -match '^\s*([^#][^=]+?)\s*=\s*(.+?)\s*$') {
-                [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], "Process")
-            }
-        }
-    }
-    $env:EXECUTE_MODE = "simulate"
-    cargo run --release --bin mev_launcher 2>&1
-} -ArgumentList (Join-Path $ROOT "core"), $envFile
-
-Start-Sleep -Seconds 2
-Write-Host "  [+] Rust engine started (PID: $($rustJob.Id))" -ForegroundColor Green
 
 # ── Open dashboard ───────────────────────────────────────────────────────────
 if (-not $NoDashboard) {
@@ -149,7 +163,7 @@ Write-Host "  All systems running. Press Ctrl+C to stop." -ForegroundColor White
 Write-Host "  ═══════════════════════════════════════════════════════════" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Go node logs:   Receive-Job -Id $($goJob.Id)" -ForegroundColor DarkGray
-Write-Host "  Rust logs:      Receive-Job -Id $($rustJob.Id)" -ForegroundColor DarkGray
+Write-Host "  Rust core logs: Receive-Job -Id $($rustJob.Id)" -ForegroundColor DarkGray
 Write-Host ""
 
 # ── Stream logs ──────────────────────────────────────────────────────────────

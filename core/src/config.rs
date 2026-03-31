@@ -127,17 +127,46 @@ impl Default for Config {
 impl Config {
     /// Load config from environment
     pub fn from_env() -> anyhow::Result<Self> {
+        dotenv::dotenv().ok();
+
         // Try to load from file first
         let config_path = std::env::var("MEV_CONFIG")
             .unwrap_or_else(|_| "config/config.json".to_string());
-        
-        if std::path::Path::new(&config_path).exists() {
+
+        let mut config = if std::path::Path::new(&config_path).exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            let config: Config = serde_json::from_str(&content)?;
-            Ok(config)
+            serde_json::from_str(&content)?
         } else {
-            Ok(Config::default())
+            Config::default()
+        };
+
+        if let Some(arbitrum) = config.chains.get_mut(&42161) {
+            if let Ok(rpc_url) = std::env::var("ARBITRUM_RPC_URL") {
+                if !rpc_url.trim().is_empty() {
+                    arbitrum.rpc_url = rpc_url;
+                }
+            }
+
+            if let Ok(ws_url) = std::env::var("ARBITRUM_WS_URL") {
+                if !ws_url.trim().is_empty() {
+                    arbitrum.ws_url = ws_url;
+                }
+            }
+
+            if let Ok(contract_address) = std::env::var("CONTRACT_ADDRESS") {
+                if !contract_address.trim().is_empty() {
+                    arbitrum.contract_address = Some(contract_address);
+                }
+            }
+
+            if let Ok(relay_url) = std::env::var("FLASHBOTS_RELAY_URL") {
+                if !relay_url.trim().is_empty() {
+                    arbitrum.flashbots_relay = Some(relay_url);
+                }
+            }
         }
+
+        Ok(config)
     }
 
     /// Save config to file

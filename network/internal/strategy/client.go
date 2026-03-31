@@ -56,6 +56,7 @@ func NewClient(cfg Config) (*Client, error) {
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx, cfg.Address,
+		grpc.WithBlock(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,

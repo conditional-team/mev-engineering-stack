@@ -106,27 +106,27 @@ func (f *Flashbots) SendBundle(ctx context.Context, bundle *Bundle) (*BundleResp
 		return nil, err
 	}
 
-	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", f.config.FlashbotsURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	// Sign the request body
 	signature, err := f.signPayload(body)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("X-Flashbots-Signature", signature)
 
 	// Send request with retries
 	var resp *http.Response
 	for i := 0; i <= f.config.MaxRetries; i++ {
+		req, reqErr := http.NewRequestWithContext(ctx, "POST", f.config.FlashbotsURL, bytes.NewReader(body))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Flashbots-Signature", signature)
+
 		resp, err = f.httpClient.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			break
+		}
+		if resp != nil {
+			resp.Body.Close()
 		}
 		if i < f.config.MaxRetries {
 			time.Sleep(100 * time.Millisecond)
@@ -202,6 +202,10 @@ func (f *Flashbots) SimulateBundle(ctx context.Context, bundle *Bundle) (*Simula
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
 
 	var result struct {
 		Result *SimulationResult `json:"result"`

@@ -188,6 +188,12 @@ pub struct PoolState {
     pub reserve1: u128,
     /// Pool fee in hundredths of a basis point
     pub fee: u32,
+    /// V3: current sqrt price as Q64.96 fixed-point (0 for V2 pools)
+    pub sqrt_price_x96: u128,
+    /// V3: active in-range liquidity L (0 for V2 pools)
+    pub liquidity: u128,
+    /// Whether this is a V3-style concentrated liquidity pool
+    pub is_v3: bool,
 }
 
 // ─── Gas estimation ──────────────────────────────────────────────

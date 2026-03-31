@@ -92,6 +92,10 @@ func main() {
 	flashbotsRelay := relay.NewFlashbots(cfg.Relay)
 	relayManager := relay.NewManager(cfg.Multi)
 	relayManager.AddRelay(flashbotsRelay, true)
+	bundleExecutor, err := newBundleExecutor(cfg, rpcPool, relayManager)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to configure execution mode")
+	}
 
 	// Start all components in dependency order
 	components := []struct {
@@ -116,11 +120,12 @@ func main() {
 	log.Info().
 		Int("rpcEndpoints", len(cfg.RPC.Endpoints)).
 		Int("pipelineWorkers", cfg.Pipeline.Workers).
+		Str("executionMode", string(cfg.Execution.Mode)).
 		Bool("metricsEnabled", cfg.Metrics.Enabled).
 		Msg("All components started — node is ready")
 
 	// Consume pipeline output (classified transactions)
-	go consumePipeline(ctx, txPipeline, gasOracle, blockWatcher, relayManager)
+	go consumePipeline(ctx, txPipeline, gasOracle, blockWatcher, bundleExecutor)
 
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
@@ -153,32 +158,52 @@ func consumePipeline(
 	p *pipeline.Pipeline,
 	gasOracle *gas.Oracle,
 	blockWatcher *block.Watcher,
-	relayMgr *relay.Manager,
+	bundleExecutor *bundleExecutor,
 ) {
-	// Connect to Rust core gRPC server
-	strategyClient, err := strategy.NewClient(strategy.DefaultConfig())
-	if err != nil {
-		log.Warn().Err(err).Msg("Rust core gRPC unavailable — running in monitor-only mode")
-		consumePipelineMonitorOnly(ctx, p, gasOracle, blockWatcher)
-		return
+	var strategyClient *strategy.Client
+	var lastConnectAttempt time.Time
+
+	connectStrategyClient := func() *strategy.Client {
+		if time.Since(lastConnectAttempt) < 2*time.Second {
+			return strategyClient
+		}
+		lastConnectAttempt = time.Now()
+
+		client, err := strategy.NewClient(strategy.DefaultConfig())
+		if err != nil {
+			log.Debug().Err(err).Msg("Rust core gRPC unavailable")
+			return nil
+		}
+
+		log.Info().Msg("Connected to Rust MEV core via gRPC")
+		return client
 	}
-	defer strategyClient.Close()
-	log.Info().Msg("Connected to Rust MEV core via gRPC")
 
 	for {
 		select {
 		case <-ctx.Done():
-			sent, recv, errs := strategyClient.Stats()
-			log.Info().
-				Uint64("sent", sent).
-				Uint64("opportunities", recv).
-				Uint64("errors", errs).
-				Msg("Strategy client shutting down")
+			if strategyClient != nil {
+				sent, recv, errs := strategyClient.Stats()
+				log.Info().
+					Uint64("sent", sent).
+					Uint64("opportunities", recv).
+					Uint64("errors", errs).
+					Msg("Strategy client shutting down")
+				_ = strategyClient.Close()
+			}
 			return
 
 		case tx, ok := <-p.OutputChan():
 			if !ok {
 				return
+			}
+
+			if strategyClient == nil {
+				strategyClient = connectStrategyClient()
+			}
+			if strategyClient == nil {
+				log.Debug().Str("hash", tx.Tx.Hash.Hex()).Msg("Classified tx (Rust core offline)")
+				continue
 			}
 
 			// Prepare target block and base fee from live oracles
@@ -213,6 +238,8 @@ func consumePipeline(
 
 			if err != nil {
 				log.Debug().Err(err).Str("hash", tx.Tx.Hash.Hex()).Msg("Detection RPC failed")
+				_ = strategyClient.Close()
+				strategyClient = nil
 				continue
 			}
 
@@ -228,7 +255,18 @@ func consumePipeline(
 							Int("bundleTxs", len(opp.Bundle.Transactions)).
 							Uint64("targetBlock", opp.Bundle.TargetBlock).
 							Msg("Bundle ready for relay submission")
-						// relayMgr.SubmitBundle(ctx, opp.Bundle) — wired when live
+
+						submitCtx, submitCancel := context.WithTimeout(ctx, 5*time.Second)
+						err := bundleExecutor.HandleOpportunityBundle(
+							submitCtx,
+							opp,
+							targetBlock,
+							gasOracle.GetEstimate(),
+						)
+						submitCancel()
+						if err != nil {
+							log.Warn().Err(err).Str("hash", tx.Tx.Hash.Hex()).Msg("Bundle execution failed")
+						}
 					}
 				}
 			}

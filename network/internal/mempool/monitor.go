@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient/gethclient"
 	"github.com/mev-protocol/network/internal/metrics"
 	rpcpool "github.com/mev-protocol/network/internal/rpc"
+	"github.com/mev-protocol/network/internal/strategy"
 	"github.com/rs/zerolog/log"
 )
 
@@ -36,13 +37,14 @@ type PendingTx struct {
 
 // Monitor watches the mempool for pending transactions
 type Monitor struct {
-	config    Config
-	rpcPool   *rpcpool.Pool
-	txChan    chan *PendingTx
-	selectors map[string]bool
-	mu        sync.RWMutex
-	running   bool
-	wg        sync.WaitGroup
+	config     Config
+	rpcPool    *rpcpool.Pool
+	txChan     chan *PendingTx
+	selectors  map[string]bool
+	mu         sync.RWMutex
+	running    bool
+	wg         sync.WaitGroup
+	coreClient *strategy.Client // gRPC client to Rust core (nil = log-only mode)
 }
 
 // NewMonitor creates a new mempool monitor
@@ -58,6 +60,14 @@ func NewMonitor(cfg Config, pool *rpcpool.Pool) *Monitor {
 		txChan:    make(chan *PendingTx, cfg.BufferSize),
 		selectors: selectors,
 	}
+}
+
+// SetCoreClient attaches a gRPC strategy client for forwarding tx to Rust core.
+// If not set, the monitor falls back to debug logging.
+func (m *Monitor) SetCoreClient(client *strategy.Client) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.coreClient = client
 }
 
 // Start begins monitoring the mempool
@@ -242,12 +252,49 @@ func (m *Monitor) processLoop(ctx context.Context) {
 }
 
 func (m *Monitor) forwardToCore(tx *PendingTx) {
-	// TODO: Send to Rust core via FFI or gRPC
-	// For now, just log
-	log.Debug().
-		Str("hash", tx.Hash.Hex()).
-		Str("to", tx.To.Hex()).
-		Uint64("value", tx.Value).
-		Int("data_len", len(tx.Input)).
-		Msg("Forwarding tx to core")
+	m.mu.RLock()
+	client := m.coreClient
+	m.mu.RUnlock()
+
+	if client == nil {
+		// No gRPC client attached — fall back to debug logging
+		log.Debug().
+			Str("hash", tx.Hash.Hex()).
+			Str("to", tx.To.Hex()).
+			Uint64("value", tx.Value).
+			Int("data_len", len(tx.Input)).
+			Msg("Forwarding tx to core (log-only, no gRPC client)")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	var toBytes []byte
+	if tx.To != nil {
+		toBytes = tx.To.Bytes()
+	}
+
+	result, err := client.DetectOpportunity(
+		ctx,
+		tx.Hash.Bytes(),
+		tx.From.Bytes(),
+		toBytes,
+		tx.Value,
+		tx.GasPrice,
+		tx.GasLimit,
+		tx.Input,
+		tx.Nonce,
+		0,   // TxClass: UNKNOWN — pipeline classifies separately
+		0,   // targetBlock — filled by block watcher
+		nil, // baseFee — filled by gas oracle
+	)
+	if err != nil {
+		log.Warn().Err(err).Str("hash", tx.Hash.Hex()).Msg("Failed to forward tx to core")
+		return
+	}
+
+	if result.Found {
+		strategy.LogOpportunities(result, tx.Hash.Hex())
+	}
 }

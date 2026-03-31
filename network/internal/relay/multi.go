@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -110,6 +111,46 @@ func (m *Manager) SubmitBundle(ctx context.Context, bundle *Bundle) ([]*SubmitRe
 	default:
 		return m.submitAll(ctx, bundle, relays)
 	}
+}
+
+// SimulateBundle runs eth_callBundle against the primary relay or the first
+// available relay, returning the first successful simulation result.
+func (m *Manager) SimulateBundle(ctx context.Context, bundle *Bundle) (RelayType, *SimulationResult, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if len(m.relays) == 0 {
+		return "", nil, ErrNoRelays
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, m.config.SubmitTimeout)
+	defer cancel()
+
+	ordered := make([]Relay, 0, len(m.relays))
+	if m.primary != nil {
+		ordered = append(ordered, m.primary)
+	}
+	for _, relay := range m.relays {
+		if m.primary != nil && relay.Name() == m.primary.Name() {
+			continue
+		}
+		ordered = append(ordered, relay)
+	}
+
+	var lastErr error
+	for _, provider := range ordered {
+		result, err := provider.SimulateBundle(ctx, bundle)
+		if err == nil {
+			return provider.Name(), result, nil
+		}
+		lastErr = err
+		log.Warn().Str("relay", string(provider.Name())).Err(err).Msg("Bundle simulation failed")
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("simulation failed without relay error")
+	}
+	return "", nil, lastErr
 }
 
 // submitRace sends to all relays concurrently, returns on first success

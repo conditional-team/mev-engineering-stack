@@ -32,6 +32,7 @@ pub use mempool::{MempoolMonitor, MempoolConfig, MempoolTx};
 pub use bench::run_all_benchmarks;
 
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{info, error};
 
@@ -43,6 +44,7 @@ pub struct MevEngine {
     simulator: Arc<EvmSimulator>,
     builder: Arc<BundleBuilder>,
     running: Arc<RwLock<bool>>,
+    start_time: Arc<RwLock<Option<Instant>>>,
 }
 
 impl MevEngine {
@@ -56,6 +58,7 @@ impl MevEngine {
             simulator: Arc::new(EvmSimulator::new(config.clone())),
             builder: Arc::new(BundleBuilder::new(config.clone())),
             running: Arc::new(RwLock::new(false)),
+            start_time: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -64,6 +67,7 @@ impl MevEngine {
         info!("Starting MEV Engine...");
         
         *self.running.write().await = true;
+        *self.start_time.write().await = Some(Instant::now());
 
         // Start components
         self.detector.start().await?;
@@ -95,11 +99,14 @@ impl MevEngine {
 
     /// Get engine statistics
     pub async fn stats(&self) -> EngineStats {
+        let uptime = self.start_time.read().await
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
         EngineStats {
             opportunities_detected: self.detector.count().await,
             simulations_run: self.simulator.count().await,
             bundles_submitted: self.builder.count().await,
-            uptime_seconds: 0, // TODO: implement
+            uptime_seconds: uptime,
         }
     }
 }
