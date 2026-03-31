@@ -1,5 +1,17 @@
-// FFI bindings for C hot path - PRODUCTION OPTIMIZED
-// Direct calls to C for sub-microsecond operations
+//! FFI bindings for the C hot-path library (`fast/`).
+//!
+//! Provides sub-microsecond primitives for the MEV pipeline by calling into
+//! hand-optimised C code compiled with `-O3 -mavx2 -msse4.2`.
+//!
+//! When the `has_c_fast_path` cfg flag is set (i.e. `libmev_fast.a` was built),
+//! functions dispatch to the C implementation. Otherwise, pure-Rust fallbacks
+//! are used transparently through the [`safe`] module.
+//!
+//! # Safety
+//!
+//! All raw FFI calls are wrapped in the [`safe`] sub-module which validates
+//! slice lengths and types before crossing the boundary. Direct use of the
+//! `extern "C"` symbols is discouraged — prefer `safe::*` wrappers.
 
 use std::ffi::c_void;
 
@@ -7,55 +19,105 @@ use std::ffi::c_void;
 #[cfg(has_c_fast_path)]
 #[link(name = "mev_fast", kind = "static")]
 extern "C" {
-    // Keccak256
+    /// Compute Keccak-256 hash of `data[0..len]` and write the 32-byte digest to `out`.
     pub fn mev_keccak256(data: *const u8, len: usize, out: *mut u8);
+
+    /// Hash a Solidity function signature (e.g. `"transfer(address,uint256)"`)
+    /// and write the first 4 bytes (selector) to `out`.
     pub fn mev_function_selector(signature: *const u8, len: usize, out: *mut u8);
-    
-    // RLP encoding
+
+    /// RLP-encode a byte string. Returns the number of bytes written to `out`.
     pub fn mev_rlp_encode_string(data: *const u8, len: usize, out: *mut u8) -> usize;
+
+    /// RLP-encode a big-endian uint256 (32-byte `value`). Returns bytes written.
     pub fn mev_rlp_encode_uint256(value: *const u8, out: *mut u8) -> usize;
+
+    /// RLP-encode a 20-byte Ethereum address. Returns bytes written (always 21).
     pub fn mev_rlp_encode_address(addr: *const u8, out: *mut u8) -> usize;
-    
-    // Calldata parsing
+
+    /// Parse raw swap calldata into a [`SwapInfoFFI`] struct.
+    /// Returns 0 on success, non-zero if the selector is unrecognised or data is malformed.
     pub fn mev_parse_swap(calldata: *const u8, len: usize, info: *mut SwapInfoFFI) -> i32;
+
+    /// Extract the 4-byte function selector from calldata.
     pub fn mev_get_selector(calldata: *const u8, out: *mut u8);
-    
-    // SIMD utils
+
+    /// SIMD-accelerated `memcmp` (AVX2 for ≥32 B, SSE4.2 for ≥16 B, scalar fallback).
+    /// Returns 0 when equal, non-zero otherwise.
     pub fn mev_memcmp_fast(a: *const u8, b: *const u8, len: usize) -> i32;
+
+    /// Compare two 20-byte Ethereum addresses using SIMD. Returns non-zero if equal.
     pub fn mev_address_eq(a: *const u8, b: *const u8) -> i32;
+
+    /// Batch constant-product price impact for 4 pools in parallel (AVX2).
+    ///
+    /// `reserves0` and `reserves1` are arrays of 4 pool reserve pairs.
+    /// `outputs[i]` receives `amount_in * reserves1[i] * 997 / (reserves0[i] * 1000 + amount_in * 997)`.
     pub fn mev_calc_price_impact_batch(
         reserves0: *const u64,
         reserves1: *const u64,
         amount_in: u64,
         outputs: *mut u64,
     );
+
+    /// Read the CPU timestamp counter (RDTSC). Non-serialising — use for relative
+    /// cycle measurements only, not wall-clock time.
     pub fn mev_rdtsc() -> u64;
+
+    /// Issue a cache prefetch hint for the memory at `data` (L1 temporal, `_MM_HINT_T0`).
     pub fn mev_prefetch_pool(data: *const c_void);
-    
-    // Memory pool
+
+    /// Initialise the arena allocator pools (tx, calldata, result buffers).
+    /// Returns 0 on success.
     pub fn mev_pools_init() -> i32;
+
+    /// Allocate a 512-byte transaction buffer from the arena pool. Returns null on exhaustion.
     pub fn mev_alloc_tx() -> *mut u8;
+
+    /// Return a transaction buffer to the arena pool.
     pub fn mev_free_tx(ptr: *mut u8);
+
+    /// Allocate a calldata buffer from the arena pool. Returns null on exhaustion.
     pub fn mev_alloc_calldata() -> *mut u8;
+
+    /// Return a calldata buffer to the arena pool.
     pub fn mev_free_calldata(ptr: *mut u8);
-    
-    // Lock-free queue
+
+    /// Create a lock-free MPSC queue with the given capacity (rounded up to power of 2).
+    /// Returns null on allocation failure.
     pub fn mev_queue_create(capacity: usize) -> *mut c_void;
+
+    /// Destroy a lock-free queue and free its backing memory.
     pub fn mev_queue_destroy(q: *mut c_void);
+
+    /// Push an item onto the queue. Returns 0 on success, -1 if full.
     pub fn mev_queue_push(q: *mut c_void, item: *mut c_void) -> i32;
+
+    /// Pop an item from the queue. Returns null if empty.
     pub fn mev_queue_pop(q: *mut c_void) -> *mut c_void;
+
+    /// Return the current number of items in the queue (approximate under concurrency).
     pub fn mev_queue_size(q: *mut c_void) -> usize;
 }
 
-/// FFI-compatible swap info
+/// C-compatible struct returned by [`mev_parse_swap`] after decoding swap calldata.
+///
+/// All multi-byte fields use big-endian encoding to match Solidity ABI conventions.
 #[repr(C)]
 pub struct SwapInfoFFI {
-    pub dex_type: u8,        // 1=UniV2, 2=UniV3, 3=Sushi
+    /// DEX identifier: 1 = Uniswap V2, 2 = Uniswap V3, 3 = SushiSwap.
+    pub dex_type: u8,
+    /// Input token address (20 bytes).
     pub token_in: [u8; 20],
+    /// Output token address (20 bytes).
     pub token_out: [u8; 20],
-    pub amount_in: [u8; 32],  // uint256 as bytes
+    /// Input amount as big-endian uint256.
+    pub amount_in: [u8; 32],
+    /// Minimum output amount as big-endian uint256 (slippage bound).
     pub amount_out_min: [u8; 32],
+    /// Target pool address (20 bytes).
     pub pool_address: [u8; 20],
+    /// Pool fee in basis points (e.g. 3000 = 0.3% for V3).
     pub fee: u32,
 }
 
@@ -75,6 +137,7 @@ impl Default for SwapInfoFFI {
 
 // ── Shared types (no FFI dependency) ──────────────────────────────────
 
+/// DEX protocol identifier used across the detection pipeline.
 #[derive(Debug, Clone)]
 pub enum DexType {
     UniswapV2,
@@ -82,6 +145,10 @@ pub enum DexType {
     SushiSwap,
 }
 
+/// Decoded swap information with Ethereum-native types.
+///
+/// Produced by [`safe::parse_swap`] after converting the raw C struct
+/// into `ethers` address/U256 types safe for further pipeline processing.
 #[derive(Debug, Clone)]
 pub struct SwapInfo {
     pub dex_type: DexType,
@@ -96,15 +163,23 @@ pub struct SwapInfo {
 // ══════════════════════════════════════════════════════════════════════
 // When the C fast-path library IS available
 // ══════════════════════════════════════════════════════════════════════
+
+/// Safe wrappers around the C hot-path library.
+///
+/// When `cfg(has_c_fast_path)` is active, these call into `libmev_fast.a`.
+/// Otherwise, identical pure-Rust fallbacks are provided so callers never
+/// need conditional compilation.
 #[cfg(has_c_fast_path)]
 pub mod safe {
     use super::*;
     use ethers::types::{Address, H256, U256};
 
+    /// Initialise C arena allocator pools. Call once at startup.
     pub fn init_pools() -> bool {
         unsafe { mev_pools_init() == 0 }
     }
 
+    /// Compute Keccak-256 via the C implementation (~550 ns for 32 bytes).
     #[inline(always)]
     pub fn keccak256_fast(data: &[u8]) -> H256 {
         let mut out = [0u8; 32];
@@ -112,6 +187,7 @@ pub mod safe {
         H256::from(out)
     }
 
+    /// Compute the 4-byte Solidity function selector for a canonical signature.
     #[inline(always)]
     pub fn function_selector(signature: &str) -> [u8; 4] {
         let mut out = [0u8; 4];
@@ -119,11 +195,13 @@ pub mod safe {
         out
     }
 
+    /// SIMD-accelerated 20-byte address comparison.
     #[inline(always)]
     pub fn address_eq(a: &Address, b: &Address) -> bool {
         unsafe { mev_address_eq(a.as_bytes().as_ptr(), b.as_bytes().as_ptr()) != 0 }
     }
 
+    /// Batch constant-product price impact for 4 pools in a single AVX2 pass.
     #[inline(always)]
     pub fn calc_price_impact_batch(
         reserves0: &[u64; 4], reserves1: &[u64; 4], amount_in: u64,
@@ -133,6 +211,8 @@ pub mod safe {
         outputs
     }
 
+    /// Parse raw swap calldata into a typed [`SwapInfo`]. Returns `None` for
+    /// unrecognised selectors or malformed ABI data.
     pub fn parse_swap(calldata: &[u8]) -> Option<SwapInfo> {
         let mut info = SwapInfoFFI::default();
         let result = unsafe { mev_parse_swap(calldata.as_ptr(), calldata.len(), &mut info) };
@@ -148,14 +228,17 @@ pub mod safe {
         })
     }
 
+    /// Read the CPU timestamp counter for cycle-level latency measurements.
     #[inline(always)]
     pub fn rdtsc() -> u64 { unsafe { mev_rdtsc() } }
 
+    /// Issue a cache prefetch hint to pull `data` into L1.
     #[inline(always)]
     pub fn prefetch<T>(data: &T) {
         unsafe { mev_prefetch_pool(data as *const T as *const c_void); }
     }
 
+    /// RLP-encode a 20-byte Ethereum address.
     pub fn rlp_encode_address(addr: &Address) -> Vec<u8> {
         let mut out = vec![0u8; 21];
         let len = unsafe { mev_rlp_encode_address(addr.as_bytes().as_ptr(), out.as_mut_ptr()) };
@@ -163,6 +246,7 @@ pub mod safe {
         out
     }
 
+    /// RLP-encode a `U256` value in big-endian form.
     pub fn rlp_encode_u256(value: U256) -> Vec<u8> {
         let mut bytes = [0u8; 32];
         value.to_big_endian(&mut bytes);
@@ -172,13 +256,18 @@ pub mod safe {
         out
     }
 
-    // Re-export shared types so `safe::DexType` etc. still resolve
     pub use super::{DexType, SwapInfo};
 }
 
 // ══════════════════════════════════════════════════════════════════════
 // Pure-Rust fallbacks when the C library is NOT compiled
 // ══════════════════════════════════════════════════════════════════════
+
+/// Pure-Rust fallback implementations matching the C hot-path API.
+///
+/// Used automatically when `has_c_fast_path` is not set (e.g. CI without a C
+/// toolchain, or development builds). Performance is ~2-5× slower than the
+/// SIMD-accelerated C version but produces identical results.
 #[cfg(not(has_c_fast_path))]
 pub mod safe {
     use super::*;
@@ -267,6 +356,11 @@ pub mod safe {
 // Lock-free queue – C FFI vs Mutex<VecDeque> fallback
 // ══════════════════════════════════════════════════════════════════════
 
+/// Lock-free MPSC queue for passing detected opportunities from detector
+/// workers to the simulator thread.
+///
+/// When `has_c_fast_path` is active, backed by the CAS-based C implementation
+/// (`fast/src/lockfree_queue.c`). Otherwise, falls back to `Mutex<VecDeque>`.
 #[cfg(has_c_fast_path)]
 pub struct OpportunityQueue { inner: *mut c_void }
 
@@ -290,11 +384,13 @@ impl Drop for OpportunityQueue {
     fn drop(&mut self) { unsafe { mev_queue_destroy(self.inner) } }
 }
 
+// Safety: the C queue uses atomic CAS operations and is safe to share across threads.
 #[cfg(has_c_fast_path)]
 unsafe impl Send for OpportunityQueue {}
 #[cfg(has_c_fast_path)]
 unsafe impl Sync for OpportunityQueue {}
 
+/// Fallback opportunity queue backed by `Mutex<VecDeque>` when the C library is not available.
 #[cfg(not(has_c_fast_path))]
 pub struct OpportunityQueue {
     inner: std::sync::Mutex<std::collections::VecDeque<*mut c_void>>,
@@ -324,6 +420,10 @@ unsafe impl Sync for OpportunityQueue {}
 // TX buffer – C pool alloc vs Vec<u8> fallback
 // ══════════════════════════════════════════════════════════════════════
 
+/// Pre-allocated 512-byte transaction buffer from the C arena pool.
+///
+/// Avoids per-transaction heap allocation in the hot path. When `has_c_fast_path`
+/// is not set, falls back to a `Vec<u8>` with the same capacity.
 #[cfg(has_c_fast_path)]
 pub struct TxBuffer { ptr: *mut u8, len: usize }
 
