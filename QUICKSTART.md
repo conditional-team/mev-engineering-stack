@@ -25,15 +25,15 @@ From repository root:
 ### Windows build
 
 ```powershell
-Copy-Item config/.env.example config/.env
-notepad config/.env
+Copy-Item .env.example .env
+notepad .env
 ```
 
 ### Linux/macOS build
 
 ```bash
-cp config/.env.example config/.env
-$EDITOR config/.env
+cp .env.example .env
+$EDITOR .env
 ```
 
 Fill required fields (private key, RPC endpoints, relay/auth settings) using your own credentials.
@@ -144,7 +144,7 @@ After deployment, apply contract security configuration before live execution:
 - Build fails in `fast/`: verify C toolchain and `make` availability.
 - `forge` missing: run `foundryup` after Foundry installation.
 - RPC connection issues: check endpoint permissions and websocket URL correctness.
-- Missing env vars: ensure `config/.env` exists and required variables are populated.
+- Missing env vars: ensure `.env` exists and required variables are populated.
 - Clippy failures: run `cd core && cargo clippy --all-targets --all-features -- -D warnings` and address warnings before PR.
 
 ---

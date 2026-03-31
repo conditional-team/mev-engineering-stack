@@ -8,7 +8,7 @@ echo "MEV Protocol - Deploy Contracts"
 echo "=================================="
 
 # Load environment
-source config/.env
+source .env
 
 # Check required variables
 if [ -z "$PRIVATE_KEY" ]; then

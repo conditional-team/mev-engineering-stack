@@ -60,7 +60,7 @@ A formal audit is recommended before any mainnet deployment with real funds.
 ## Secret Handling
 
 - **Never** commit private keys, tokens, RPC credentials, or signed payloads.
-- Use `config/.env.example` as template only — copy to `.env` and populate locally.
+- Use `.env.example` as template only — copy to `.env` and populate locally.
 - Keep runtime secrets in local `.env` files excluded by `.gitignore`.
 - Signing keys should be rotated regularly and scoped to testnet during development.
 

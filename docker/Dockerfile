@@ -4,7 +4,7 @@
 # Final image is ~80 MB with only the binary, TLS certs, and OpenSSL.
 #
 # Build:  docker build -f docker/Dockerfile -t mev-engine .
-# Run:    docker run --env-file config/.env mev-engine
+# Run:    docker run --env-file .env mev-engine
 
 # ── Stage 1: Build ───────────────────────────────────────────────────
 FROM rust:1.75-slim-bookworm as builder

@@ -27,8 +27,8 @@ Write-Host "  ✓ Rust installed" -ForegroundColor Green
 # Load environment
 Write-Host "`n[2/5] Loading environment..." -ForegroundColor Yellow
 
-if (Test-Path "config/.env") {
-    Get-Content "config/.env" | ForEach-Object {
+if (Test-Path ".env") {
+    Get-Content ".env" | ForEach-Object {
         if ($_ -match "^([^#][^=]+)=(.*)$") {
             [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim())
         }
@@ -80,7 +80,7 @@ Write-Host "================================" -ForegroundColor Cyan
 
 Write-Host "`nNext steps:"
 Write-Host "  1. Get testnet ETH from https://faucet.arbitrum.io/"
-Write-Host "  2. Set PRIVATE_KEY in config/.env"
+Write-Host "  2. Set PRIVATE_KEY in .env"
 Write-Host "  3. Deploy to testnet:"
 Write-Host "     cd contracts"
 Write-Host "     forge script script/DeployArbitrum.s.sol:DeployArbitrumSepolia --rpc-url `$ARBITRUM_SEPOLIA_RPC --broadcast"

@@ -91,7 +91,7 @@ contract DeployArbitrumMainnet is Script {
         console.log("Balancer Vault:", BALANCER_VAULT);
         console.log("\nNext steps:");
         console.log("1. Verify contract on Arbiscan");
-        console.log("2. Update config/.env with contract address");
+        console.log("2. Update .env with contract address");
         console.log("3. Fund contract with ETH for gas");
     }
 }

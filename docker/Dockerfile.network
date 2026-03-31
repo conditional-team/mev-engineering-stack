@@ -4,7 +4,7 @@
 # → copy to minimal Alpine runtime (~15 MB final image).
 #
 # Build:  docker build -f docker/Dockerfile.network -t mev-node .
-# Run:    docker run --env-file config/.env mev-node
+# Run:    docker run --env-file .env mev-node
 
 # ── Stage 1: Build ───────────────────────────────────────────────────
 FROM golang:1.21-alpine as builder
