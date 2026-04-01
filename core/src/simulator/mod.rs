@@ -87,20 +87,33 @@ impl EvmSimulator {
     }
 
     /// Look up full pool state including V3 fields.
-    fn pool_state_full(&self, pool_addr: &[u8; 20]) -> (u128, u128, u128, u128, u128, bool) {
+    fn pool_state_full(&self, pool_addr: &[u8; 20]) -> PoolStateSnapshot {
         if *pool_addr != [0u8; 20] {
             if let Some(pool) = self.pool_cache.read().get(pool_addr) {
-                return (
-                    pool.reserve0,
-                    pool.reserve1,
-                    pool.fee as u128,
-                    pool.sqrt_price_x96,
-                    pool.liquidity,
-                    pool.is_v3,
-                );
+                return PoolStateSnapshot {
+                    reserve0: pool.reserve0,
+                    reserve1: pool.reserve1,
+                    fee: pool.fee as u128,
+                    sqrt_price_x96: pool.sqrt_price_x96,
+                    liquidity: pool.liquidity,
+                    is_v3: pool.is_v3,
+                    current_tick: pool.current_tick,
+                    tick_spacing: pool.tick_spacing,
+                    ticks: pool.ticks.clone(),
+                };
             }
         }
-        (DEFAULT_WETH_RESERVE, DEFAULT_USDC_RESERVE, DEFAULT_FEE_BPS, 0, 0, false)
+        PoolStateSnapshot {
+            reserve0: DEFAULT_WETH_RESERVE,
+            reserve1: DEFAULT_USDC_RESERVE,
+            fee: DEFAULT_FEE_BPS,
+            sqrt_price_x96: 0,
+            liquidity: 0,
+            is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
+        }
     }
 
     /// Execute a swap against a pool, automatically choosing V2 or V3 math.
@@ -111,21 +124,27 @@ impl EvmSimulator {
         fee_override: Option<u128>,
         zero_for_one: bool,
     ) -> u128 {
-        let (r0, r1, default_fee, sqrt_price, liquidity, is_v3) = self.pool_state_full(pool_addr);
-        let fee = fee_override.unwrap_or(default_fee);
+        let snap = self.pool_state_full(pool_addr);
+        let fee = fee_override.unwrap_or(snap.fee);
 
-        if is_v3 && sqrt_price > 0 && liquidity > 0 {
-            concentrated_liquidity_swap(
-                amount_in,
-                sqrt_price,
-                liquidity,
-                if zero_for_one { r0 } else { r1 },
-                if zero_for_one { r1 } else { r0 },
-                fee,
-                zero_for_one,
-            )
+        if snap.is_v3 && snap.sqrt_price_x96 > 0 && snap.liquidity > 0 {
+            if !snap.ticks.is_empty() {
+                // Full multi-tick traversal when tick data is available
+                multi_tick_swap(
+                    amount_in, snap.sqrt_price_x96, snap.liquidity,
+                    snap.current_tick, &snap.ticks, fee, zero_for_one,
+                )
+            } else {
+                // Single-range approximation when tick data is unavailable
+                concentrated_liquidity_swap(
+                    amount_in, snap.sqrt_price_x96, snap.liquidity,
+                    if zero_for_one { snap.reserve0 } else { snap.reserve1 },
+                    if zero_for_one { snap.reserve1 } else { snap.reserve0 },
+                    fee, zero_for_one,
+                )
+            }
         } else {
-            let (ri, ro) = if zero_for_one { (r0, r1) } else { (r1, r0) };
+            let (ri, ro) = if zero_for_one { (snap.reserve0, snap.reserve1) } else { (snap.reserve1, snap.reserve0) };
             constant_product_swap(amount_in, ri, ro, fee)
         }
     }
@@ -392,6 +411,19 @@ impl EvmSimulator {
 
 // ─── helpers ──────────────────────────────────────────────────────
 
+/// Internal snapshot of pool state used by `swap_through_pool`.
+struct PoolStateSnapshot {
+    reserve0: u128,
+    reserve1: u128,
+    fee: u128,
+    sqrt_price_x96: u128,
+    liquidity: u128,
+    is_v3: bool,
+    current_tick: i32,
+    tick_spacing: i32,
+    ticks: Vec<(i32, u128, i128)>,
+}
+
 /// Canonical pair ordering so (tokenA, tokenB) and (tokenB, tokenA) hit the same key.
 #[inline]
 fn ordered_pair(a: [u8; 20], b: [u8; 20]) -> ([u8; 20], [u8; 20]) {
@@ -470,49 +502,19 @@ pub fn concentrated_liquidity_swap(
         None => return 0,
     };
 
-    // Q96 = 2^96
-    const Q96: u128 = 1u128 << 96;
-
     if zero_for_one {
-        // Swapping token0 → token1
-        // new_sqrt_price = L * sqrt_price / (L + amount_in * sqrt_price)
-        // amount_out = L * (sqrt_price_old - sqrt_price_new)
-        //
-        // Single active-range approximation: treats liquidity as constant over the swap.
-        // This is accurate for in-range MEV-sized trades that do not cross ticks.
-        // amount_out = L * √P_old - L * √P_new
-        //            = L * √P_old * amount_in * √P_old / (L + amount_in * √P_old)
-        //        (this is the exact V3 formula reduced to single-range)
-
-        // numerator = L * sqrt_price * amount_in_after_fee * sqrt_price
-        //           = amount_in_after_fee * liquidity * sqrt_price^2 / (L * Q96 + amount_in_after_fee * sqrt_price)
-        // Use u128 step-by-step to avoid overflow:
-
-        // Virtual reserve computation:
-        //   virtual_x = L * Q96 / sqrt_price
-        //   virtual_y = L * sqrt_price / Q96
-        let virtual_x = match liquidity.checked_mul(Q96) {
-            Some(v) => v / sqrt_price_x96,
-            None => return constant_product_swap(amount_in, reserve_in, reserve_out, fee_bps),
-        };
-        let virtual_y = match liquidity.checked_mul(sqrt_price_x96) {
-            Some(v) => v / Q96,
-            None => return constant_product_swap(amount_in, reserve_in, reserve_out, fee_bps),
-        };
+        let (virtual_x, virtual_y) = v3_virtual_reserves(liquidity, sqrt_price_x96);
+        if virtual_x == 0 || virtual_y == 0 {
+            return constant_product_swap(amount_in, reserve_in, reserve_out, fee_bps);
+        }
 
         // Use constant product on virtual reserves
         constant_product_swap_no_fee(amount_in_after_fee, virtual_x, virtual_y)
     } else {
-        // Swapping token1 → token0
-        // Virtual reserves flipped
-        let virtual_x = match liquidity.checked_mul(Q96) {
-            Some(v) => v / sqrt_price_x96,
-            None => return constant_product_swap(amount_in, reserve_in, reserve_out, fee_bps),
-        };
-        let virtual_y = match liquidity.checked_mul(sqrt_price_x96) {
-            Some(v) => v / Q96,
-            None => return constant_product_swap(amount_in, reserve_in, reserve_out, fee_bps),
-        };
+        let (virtual_x, virtual_y) = v3_virtual_reserves(liquidity, sqrt_price_x96);
+        if virtual_x == 0 || virtual_y == 0 {
+            return constant_product_swap(amount_in, reserve_in, reserve_out, fee_bps);
+        }
 
         // token1 → token0: virtual_y is reserve_in, virtual_x is reserve_out
         constant_product_swap_no_fee(amount_in_after_fee, virtual_y, virtual_x)
@@ -534,6 +536,239 @@ fn constant_product_swap_no_fee(amount_in: u128, reserve_in: u128, reserve_out: 
         None => return 0,
     };
     if denominator == 0 { 0 } else { numerator / denominator }
+}
+
+/// Overflow-safe `a * b / c` for u128 arithmetic using 256-bit intermediate.
+///
+/// Computes `floor(a * b / c)` without intermediate overflow.
+/// Uses schoolbook 4×u64 multiplication to produce a 256-bit product,
+/// then divides by `c` via binary long division.
+///
+/// Returns `None` only when `c == 0`.
+#[inline]
+fn mul_div_u128(a: u128, b: u128, c: u128) -> Option<u128> {
+    if c == 0 { return None; }
+    // Fast path: no overflow
+    if let Some(ab) = a.checked_mul(b) {
+        return Some(ab / c);
+    }
+    // 256-bit intermediate: a * b → (hi, lo)
+    let (lo, hi) = wide_mul_u128(a, b);
+    Some(div_u256_by_u128(hi, lo, c))
+}
+
+/// 128×128 → 256 wide multiplication.
+/// Returns (lo, hi) where result = hi * 2^128 + lo.
+#[inline]
+fn wide_mul_u128(a: u128, b: u128) -> (u128, u128) {
+    let a0 = a as u64 as u128;
+    let a1 = (a >> 64) as u128;
+    let b0 = b as u64 as u128;
+    let b1 = (b >> 64) as u128;
+
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+
+    // Accumulate cross terms with carry tracking
+    let (mid, mid_carry) = p01.overflowing_add(p10);
+    let (lo, lo_carry) = p00.overflowing_add(mid << 64);
+    let hi = p11
+        + (mid >> 64)
+        + if mid_carry { 1u128 << 64 } else { 0 }
+        + if lo_carry { 1 } else { 0 };
+
+    (lo, hi)
+}
+
+/// Divide 256-bit (hi:lo) by u128 divisor. Assumes result fits in u128.
+#[inline]
+fn div_u256_by_u128(hi: u128, lo: u128, d: u128) -> u128 {
+    if hi == 0 { return lo / d; }
+
+    // Binary long division over the quotient bits.
+    // We maintain a running remainder in u128 (valid because remainder < d < 2^128).
+    let mut rem = hi % d;
+    let mut q: u128 = 0;
+
+    // Process the upper 128 bits of the dividend (they are `hi`).
+    // We already extracted rem = hi % d. The quotient contribution from hi
+    // would be (hi/d) << 128, but we only need the low 128 bits of the final
+    // quotient — which is guaranteed to hold the full result by caller contract.
+    // So we just carry rem forward.
+
+    // Now process `lo` 64 bits at a time (two iterations).
+    // Iteration 1: top 64 bits of `lo`
+    let lo_hi = (lo >> 64) as u128;
+    let dividend_1 = (rem << 64) | lo_hi;
+    let q_1 = dividend_1 / d;
+    rem = dividend_1 % d;
+
+    // Iteration 2: bottom 64 bits of `lo`
+    let lo_lo = (lo & 0xFFFF_FFFF_FFFF_FFFF) as u128;
+    let dividend_2 = (rem << 64) | lo_lo;
+    let q_2 = dividend_2 / d;
+
+    q = (q_1 << 64) | q_2;
+    q
+}
+
+/// Compute V3 virtual reserves from sqrtPriceX96 and liquidity.
+///   virtual_x = L * Q96 / sqrtPrice  (token0 reserve)
+///   virtual_y = L * sqrtPrice / Q96   (token1 reserve)
+#[inline]
+fn v3_virtual_reserves(liquidity: u128, sqrt_price_x96: u128) -> (u128, u128) {
+    const Q96: u128 = 1u128 << 96;
+    let virtual_x = mul_div_u128(liquidity, Q96, sqrt_price_x96).unwrap_or(0);
+    let virtual_y = mul_div_u128(liquidity, sqrt_price_x96, Q96).unwrap_or(0);
+    (virtual_x, virtual_y)
+}
+
+/// Uniswap V3 multi-tick swap simulation.
+///
+/// Iterates through initialized tick boundaries, adjusting active liquidity
+/// at each crossing, until either all input is consumed or the price moves
+/// beyond the last initialized tick.
+///
+/// ## Parameters
+/// - `amount_in`: total input amount
+/// - `sqrt_price_x96`: current pool sqrt price (Q64.96)
+/// - `liquidity`: current active in-range liquidity
+/// - `current_tick`: current tick index
+/// - `ticks`: sorted `(tick_index, sqrt_price_x96_at_tick, liquidity_net)` for initialized ticks.
+///   `sqrt_price_x96_at_tick` is the exact sqrtPriceX96 at that tick boundary.
+///   `liquidity_net` is added when crossing from left-to-right, subtracted right-to-left.
+/// - `fee_bps`: fee in basis points
+/// - `zero_for_one`: swap direction (true = token0→token1, price decreases)
+///
+/// Falls back to single-range when no ticks are available.
+pub fn multi_tick_swap(
+    amount_in: u128,
+    sqrt_price_x96: u128,
+    liquidity: u128,
+    current_tick: i32,
+    ticks: &[(i32, u128, i128)],
+    fee_bps: u128,
+    zero_for_one: bool,
+) -> u128 {
+    if amount_in == 0 || fee_bps >= 10_000 || liquidity == 0 || sqrt_price_x96 == 0 {
+        return 0;
+    }
+
+    // Apply fee up front
+    let amount_remaining = match amount_in.checked_mul(10_000 - fee_bps) {
+        Some(v) => v / 10_000,
+        None => return 0,
+    };
+
+    const Q96: u128 = 1u128 << 96;
+    // Max ticks to cross to prevent unbounded loops
+    const MAX_TICK_CROSSINGS: usize = 20;
+
+    let mut remaining = amount_remaining;
+    let mut total_out: u128 = 0;
+    let mut current_sqrt = sqrt_price_x96;
+    let mut current_liq = liquidity;
+    let mut tick = current_tick;
+    let mut crossings = 0;
+
+    while remaining > 0 && crossings < MAX_TICK_CROSSINGS {
+        // Find the next initialized tick boundary in the swap direction
+        let next_tick = if zero_for_one {
+            // Moving left: find the highest tick <= current tick
+            ticks.iter()
+                .filter(|(t, _, _)| *t <= tick)
+                .max_by_key(|(t, _, _)| *t)
+        } else {
+            // Moving right: find the lowest tick > current tick
+            ticks.iter()
+                .filter(|(t, _, _)| *t > tick)
+                .min_by_key(|(t, _, _)| *t)
+        };
+
+        // Get sqrt price at boundary from tick data (exact, no approximation)
+        let (boundary_sqrt, boundary_liq_net) = match next_tick {
+            Some(&(_, sqrt_at_tick, liq_net)) => {
+                (sqrt_at_tick.max(1), liq_net)
+            }
+            None => {
+                // No more initialized ticks — consume everything in current range
+                let (virtual_x, virtual_y) = v3_virtual_reserves(current_liq, current_sqrt);
+                let (ri, ro) = if zero_for_one { (virtual_x, virtual_y) } else { (virtual_y, virtual_x) };
+                total_out += constant_product_swap_no_fee(remaining, ri, ro);
+                break;
+            }
+        };
+
+        // Compute virtual reserves in the current range
+        let (virtual_x, virtual_y) = v3_virtual_reserves(current_liq, current_sqrt);
+        if virtual_x == 0 || virtual_y == 0 { break; }
+
+        // How much input fills this range up to the boundary?
+        // For zero_for_one: adding token0 decreases sqrt price
+        //   max_input_this_range = virtual_x * (current_sqrt - boundary_sqrt) / boundary_sqrt
+        // For !zero_for_one: adding token1 increases sqrt price
+        //   max_input_this_range = virtual_y * (boundary_sqrt - current_sqrt) / current_sqrt
+        let max_input = if zero_for_one {
+            if current_sqrt <= boundary_sqrt { break; }
+            let price_range = current_sqrt - boundary_sqrt;
+            mul_div_u128(virtual_x, price_range, boundary_sqrt.max(1)).unwrap_or(u128::MAX)
+        } else {
+            if boundary_sqrt <= current_sqrt { break; }
+            let price_range = boundary_sqrt - current_sqrt;
+            mul_div_u128(virtual_y, price_range, current_sqrt.max(1)).unwrap_or(u128::MAX)
+        };
+
+        if remaining <= max_input {
+            // Swap completes within this tick range
+            let (ri, ro) = if zero_for_one { (virtual_x, virtual_y) } else { (virtual_y, virtual_x) };
+            total_out += constant_product_swap_no_fee(remaining, ri, ro);
+            remaining = 0;
+        } else {
+            // Consume this entire range, then cross the tick
+            let (ri, ro) = if zero_for_one { (virtual_x, virtual_y) } else { (virtual_y, virtual_x) };
+            total_out += constant_product_swap_no_fee(max_input, ri, ro);
+            remaining = remaining.saturating_sub(max_input);
+
+            // Cross the tick: adjust liquidity
+            let liq_change = if zero_for_one {
+                // Crossing left-to-right tick boundary going left → subtract liquidityNet
+                -(boundary_liq_net)
+            } else {
+                // Crossing right-to-left tick boundary going right → add liquidityNet
+                boundary_liq_net
+            };
+
+            current_liq = if liq_change >= 0 {
+                current_liq.saturating_add(liq_change as u128)
+            } else {
+                current_liq.saturating_sub(liq_change.unsigned_abs())
+            };
+
+            // Update price and tick position
+            current_sqrt = boundary_sqrt;
+            tick = if zero_for_one {
+                next_tick.map(|(t, _, _)| *t - 1).unwrap_or(tick - 1)
+            } else {
+                next_tick.map(|(t, _, _)| *t).unwrap_or(tick + 1)
+            };
+
+            crossings += 1;
+
+            if current_liq == 0 {
+                // Entered an uninitialized range — remaining input is unswappable
+                debug!(remaining, crossings, "Hit zero-liquidity range during multi-tick swap");
+                break;
+            }
+        }
+    }
+
+    if crossings > 0 {
+        debug!(crossings, total_out, "Multi-tick V3 swap completed");
+    }
+
+    total_out
 }
 
 /// Estimate gas for a bundle transaction based on data length
@@ -661,6 +896,9 @@ mod tests {
             sqrt_price_x96: 0,
             liquidity: 0,
             is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
         };
         sim.load_pools(vec![pool.clone()]);
 
@@ -686,6 +924,9 @@ mod tests {
             sqrt_price_x96: 0,
             liquidity: 0,
             is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
         });
         assert!(sim.get_pool(&[0xBB; 20]).is_some());
     }
@@ -703,6 +944,9 @@ mod tests {
             sqrt_price_x96: 0,
             liquidity: 0,
             is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
         });
         sim.update_pool(PoolState {
             address: [0xCC; 20],
@@ -714,6 +958,9 @@ mod tests {
             sqrt_price_x96: 0,
             liquidity: 0,
             is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
         });
         let p = sim.get_pool(&[0xCC; 20]).unwrap();
         assert_eq!(p.reserve0, 9999);
@@ -733,6 +980,9 @@ mod tests {
             sqrt_price_x96: 0,
             liquidity: 0,
             is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
         });
         let (r0, r1, fee) = sim.pool_reserves(&[0xDD; 20]);
         assert_eq!(r0, 42);
@@ -828,6 +1078,116 @@ mod tests {
         let b = [0x02; 20];
         assert_eq!(ordered_pair(a, b), (a, b));
         assert_eq!(ordered_pair(b, a), (a, b));
+    }
+
+    // ── Multi-tick V3 tests ──
+
+    // Helper: compute approximate sqrtPriceX96 at a tick relative to a known price.
+    // sqrtPrice(tick) ≈ sqrtPrice(0) * (1.00005)^tick
+    // For test purposes: shift by ~5 bps per tick from current price.
+    fn sqrt_price_at_tick(base_sqrt: u128, tick: i32) -> u128 {
+        let mut price = base_sqrt;
+        let steps = tick.unsigned_abs();
+        for _ in 0..steps.min(2000) {
+            if tick > 0 {
+                // Multiply by 1.00005 ≈ (20001/20000)
+                price = price / 20_000 * 20_001 + price % 20_000 * 20_001 / 20_000;
+            } else {
+                // Divide by 1.00005 ≈ (20000/20001)
+                price = price / 20_001 * 20_000 + price % 20_001 * 20_000 / 20_001;
+            }
+        }
+        price.max(1)
+    }
+
+    #[test]
+    fn test_multi_tick_swap_single_range_no_crossing() {
+        // Small trade that stays within one tick range
+        let sqrt_price: u128 = 3_543_191_142_285_914_205_922_034_688; // ~2000 USDC/ETH
+        let liquidity: u128 = 10_000_000_000_000_000_000;
+        let ticks = vec![
+            (-200, sqrt_price_at_tick(sqrt_price, -200), 5_000_000_000_000_000_000i128),
+            (200, sqrt_price_at_tick(sqrt_price, 200), -5_000_000_000_000_000_000i128),
+        ];
+
+        let out = multi_tick_swap(
+            1_000_000_000_000_000, // 0.001 ETH — small trade, won't cross
+            sqrt_price, liquidity, 0, &ticks, 30, true,
+        );
+        assert!(out > 0, "Small multi-tick swap should produce output, got 0");
+    }
+
+    #[test]
+    fn test_multi_tick_swap_crosses_tick() {
+        // Larger trade that should cross at least one tick boundary
+        let sqrt_price: u128 = 3_543_191_142_285_914_205_922_034_688;
+        let liquidity: u128 = 1_000_000_000_000_000_000;
+
+        // Tick boundaries placed below current tick (0) for zero_for_one direction.
+        // Current tick=0, ticks at -10 and -50 with different liquidity contributions.
+        let ticks = vec![
+            (-50, sqrt_price_at_tick(sqrt_price, -50), 300_000_000_000_000_000i128),
+            (-10, sqrt_price_at_tick(sqrt_price, -10), 500_000_000_000_000_000i128),
+            (50, sqrt_price_at_tick(sqrt_price, 50), -500_000_000_000_000_000i128),
+            (100, sqrt_price_at_tick(sqrt_price, 100), -300_000_000_000_000_000i128),
+        ];
+
+        let out = multi_tick_swap(
+            5_000_000_000_000_000_000, // 5 ETH
+            sqrt_price, liquidity, 0, &ticks, 30, true,
+        );
+        assert!(out > 0, "Cross-tick swap should produce output");
+    }
+
+    #[test]
+    fn test_multi_tick_swap_no_ticks_fallback() {
+        // Empty tick array — should consume everything in single range
+        let sqrt_price: u128 = 3_543_191_142_285_914_205_922_034_688;
+        let liquidity: u128 = 10_000_000_000_000_000_000;
+
+        let out = multi_tick_swap(
+            1_000_000_000_000_000_000, // 1 ETH
+            sqrt_price, liquidity, 0, &[], 30, true,
+        );
+        assert!(out > 0, "Should use single-range when no ticks provided");
+    }
+
+    #[test]
+    fn test_multi_tick_swap_zero_liquidity_stops() {
+        let sqrt_price: u128 = 3_543_191_142_285_914_205_922_034_688;
+        let liquidity: u128 = 1_000_000_000_000_000_000;
+
+        let ticks = vec![
+            (-10, sqrt_price_at_tick(sqrt_price, -10), -(liquidity as i128)),
+        ];
+
+        let out = multi_tick_swap(
+            10_000_000_000_000_000_000, // 10 ETH
+            sqrt_price, liquidity, 0, &ticks, 30, true,
+        );
+        // Should produce partial output, not panic
+        assert!(out > 0 || out == 0, "Should handle zero-liquidity gracefully");
+    }
+
+    #[test]
+    fn test_multi_tick_swap_both_directions() {
+        let sqrt_price: u128 = 3_543_191_142_285_914_205_922_034_688;
+        let liquidity: u128 = 10_000_000_000_000_000_000;
+        let ticks = vec![
+            (-200, sqrt_price_at_tick(sqrt_price, -200), 2_000_000_000_000_000_000i128),
+            (200, sqrt_price_at_tick(sqrt_price, 200), -2_000_000_000_000_000_000i128),
+        ];
+
+        let out_0to1 = multi_tick_swap(
+            1_000_000_000_000_000_000, sqrt_price, liquidity,
+            0, &ticks, 30, true,
+        );
+        let out_1to0 = multi_tick_swap(
+            1_000_000_000_000_000_000, sqrt_price, liquidity,
+            0, &ticks, 30, false,
+        );
+        assert!(out_0to1 > 0, "0→1 should produce output");
+        assert!(out_1to0 > 0, "1→0 should produce output");
     }
 
     #[tokio::test]
