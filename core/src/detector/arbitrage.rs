@@ -713,6 +713,9 @@ mod tests {
             sqrt_price_x96: 0,
             liquidity: 0,
             is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
         };
         let swap = SwapInfo {
             dex: DexType::UniswapV2,
@@ -739,6 +742,9 @@ mod tests {
             sqrt_price_x96: 0,
             liquidity: 0,
             is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
         };
         let swap = SwapInfo {
             dex: DexType::UniswapV2,
@@ -765,6 +771,9 @@ mod tests {
             sqrt_price_x96: 0,
             liquidity: 0,
             is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
         };
         let swap = SwapInfo {
             dex: DexType::UniswapV2,
