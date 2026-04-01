@@ -44,19 +44,24 @@ extern "C" {
     pub fn mev_queue_size(q: *mut c_void) -> usize;
 }
 
-/// Safe wrapper for Keccak256
+/// Safe wrapper for Keccak256.
+///
+/// When the C hot-path library is compiled in (`has_c_fast_path`), the SIMD-
+/// accelerated C implementation is used by default. Set `MEV_DISABLE_FFI=1`
+/// to force the pure-Rust fallback (useful for debugging or portability).
+///
+/// Without the C library, always uses the Rust `sha3` crate.
 pub fn keccak256(input: &[u8]) -> [u8; 32] {
     let mut output = [0u8; 32];
 
     #[cfg(has_c_fast_path)]
-    if use_c_fast_path() {
+    if !disable_c_fast_path() {
         unsafe {
             mev_keccak256(input.as_ptr(), input.len(), output.as_mut_ptr());
         }
         return output;
     }
     
-    // Default path uses Rust Keccak for portability; C fast-path remains available behind FFI.
     use sha3::{Digest, Keccak256 as K256};
     let mut hasher = K256::new();
     hasher.update(input);
@@ -65,10 +70,12 @@ pub fn keccak256(input: &[u8]) -> [u8; 32] {
     output
 }
 
-/// Safe wrapper for RLP encoding
+/// Safe wrapper for RLP encoding.
+///
+/// Dispatches to C when available (same opt-out via `MEV_DISABLE_FFI=1`).
 pub fn rlp_encode(input: &[u8]) -> Vec<u8> {
     #[cfg(has_c_fast_path)]
-    if use_c_fast_path() {
+    if !disable_c_fast_path() {
         let mut out = vec![0u8; input.len().saturating_add(16)];
         let written = unsafe { mev_rlp_encode_string(input.as_ptr(), input.len(), out.as_mut_ptr()) };
         if written > 0 && written <= out.len() {
@@ -99,15 +106,24 @@ fn to_be_bytes(n: usize) -> Vec<u8> {
     bytes[start..].to_vec()
 }
 
+/// Returns `true` when the user explicitly opted out of the C fast path
+/// by setting `MEV_DISABLE_FFI=1` (or `true`/`yes`/`on`).
+///
+/// By default, when the C library is compiled in, it is used on every call.
 #[cfg(has_c_fast_path)]
-fn use_c_fast_path() -> bool {
-    match std::env::var("MEV_USE_FFI") {
-        Ok(v) => {
-            let normalized = v.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+fn disable_c_fast_path() -> bool {
+    // Cache the result in a static to avoid env var lookup on every call.
+    use std::sync::OnceLock;
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        match std::env::var("MEV_DISABLE_FFI") {
+            Ok(v) => {
+                let normalized = v.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            }
+            Err(_) => false,
         }
-        Err(_) => false,
-    }
+    })
 }
 
 #[cfg(test)]
