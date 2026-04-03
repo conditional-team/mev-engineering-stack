@@ -1,9 +1,17 @@
-//! EVM Simulator — local state-fork execution via revm
+//! MEV Simulator — two-stage pipeline
 //!
-//! Simulates opportunities and bundles against a cached fork of chain
-//! state. Uses revm's in-memory database to execute transactions
-//! without sending them on-chain, producing precise gas and profit
-//! estimates before committing to bundle submission.
+//! **Stage 1** (this module): AMM math filter — constant-product and
+//! concentrated-liquidity models screen candidates at ~35 ns each.
+//!
+//! **Stage 2** (`evm` sub-module): fork-mode EVM execution via revm —
+//! survivors from Stage 1 are simulated against forked on-chain state
+//! for precise gas and profit estimates (~50-200 µs).
+//!
+//! ```text
+//! Opportunity → [Stage 1: AMM math 35ns] → candidate → [Stage 2: revm fork] → GO/NO-GO
+//! ```
+
+pub mod evm;
 
 use crate::config::Config;
 use crate::types::{Opportunity, OpportunityType, SimulationResult, Bundle, StateChange, PoolState};

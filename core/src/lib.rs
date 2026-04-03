@@ -6,7 +6,7 @@
 //! - FFI: C hot path bindings for SIMD/lock-free operations
 //! - Mempool: Ultra-low latency WebSocket monitoring
 //! - Detector: Multi-threaded work-stealing arbitrage detection
-//! - Simulator: REVM-based EVM simulation
+//! - Simulator: Two-stage pipeline — AMM math filter + REVM fork execution
 //! - Builder: Bundle construction and submission
 
 #![allow(unused_imports, unused_variables, dead_code, unused_mut)]
@@ -27,6 +27,7 @@ pub mod arbitrum;
 pub use config::Config;
 pub use detector::OpportunityDetector;
 pub use simulator::EvmSimulator;
+pub use simulator::evm::{EvmForkSimulator, ForkDB, BlockContext};
 pub use builder::BundleBuilder;
 pub use mempool::{MempoolMonitor, MempoolConfig, MempoolTx};
 pub use bench::run_all_benchmarks;
