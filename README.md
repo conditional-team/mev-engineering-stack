@@ -91,6 +91,7 @@ The goal is not profitability, but engineering performance and system reliabilit
           │ FlashArb    │ ◄── Balancer V2 flash loans (0% fee)
           │ MultiDexRtr │ ◄── V2/V3/Sushi/Curve routing
           └─────────────┘
+```
 
 ### Deployed Contracts (Sepolia Testnet)
 
@@ -98,7 +99,6 @@ The goal is not profitability, but engineering performance and system reliabilit
 |----------|---------|----------|
 | FlashArbitrage | `0x42a372E2f161e978ee9791F399c27c56D6CB55eb` | [Verified ✅](https://sepolia.etherscan.io/address/0x42a372e2f161e978ee9791f399c27c56d6cb55eb) |
 | MultiDexRouter | `0xB6F5A4cd9d0f97632Ef38781A1aaef0C965CAed6` | [Verified ✅](https://sepolia.etherscan.io/address/0xb6f5a4cd9d0f97632ef38781a1aaef0c965caed6) |
-```
 
 ### Layer Breakdown
 
@@ -119,38 +119,42 @@ Real-time monitoring dashboard polling Prometheus metrics every 2 seconds. Singl
 ```
 ┌──────────────┬──────────────────────────────────────────────┬──────────────┐
 │  NETWORK     │        TRANSACTION PROCESSING PIPELINE       │  LIVE FEED   │
-│              │  Ingest → Classify → Filter → Opp → Relay   │  55 events   │
-│  Block #448M │         623     623     30     181    0      │              │
-│  RPC 1/1     │                                              │  PERFORMANCE │
-│  Propagation │        REVENUE & P&L           SESSION       │  40.7ns      │
-│  1000ms      │        Total Extracted: 0.0000 ETH           │  425ns       │
+│              │  Ingest → Classify → Filter → Opp → Relay   │  200 events  │
+│  Block #450M │        41.2K   41.2K   8.3K   8.3K    0     │              │
+│  RPC 3/3     │                                              │  LIVE PIPELN │
+│  Propagation │        CLASSIFICATION BREAKDOWN              │  Classify    │
+│  1023ms      │   V2: 79  V3: 1.8K  Transfer: 6.4K          │  1.1 µs/tx   │
+│              │                                              │              │
+│  TX SOURCE   │        EIP-1559 GAS ORACLE   250ms           │  BENCHMARKS  │
+│  Classified  │   Base: 0.020  Priority: 2.0  Pred: 0.0175   │  40.7 ns/op  │
+│  41.2K       │                                              │  425 ns/op   │
 │              │                                              │  4 workers   │
-│  TX SOURCE   │        CLASSIFICATION BREAKDOWN              │              │
-│  Classified  │   V2: 0   V3: 30   Transfer: 151            │  ERRORS      │
-│  623         │                                              │  0  0  0     │
-│              │        EIP-1559 GAS ORACLE   250ms           │              │
-│  Buffer 6%   │   Base: 0.020  Priority: 0.01  Pred: 0.022  │              │
+│  Buffer 0%   │                                              │  ERRORS 0    │
 └──────────────┴──────────────────────────────────────────────┴──────────────┘
 ```
 
 **Features:**
-- 3-column layout: Network stats, pipeline center, live feed + performance
+- 3-column layout: Network stats, pipeline center, live feed + metrics
 - Transaction Processing Pipeline with animated particle flow
 - Classification Breakdown (Swap V2, V3, Liquidation, Flash Loan, Transfer)
 - EIP-1559 Gas Oracle with base fee prediction gauges
-- Revenue & P&L tracking (session-scoped)
+- Live Pipeline metrics: classify stage latency, block processing, RPC latency (histogram avg)
+- Engine Benchmarks: static `go test -bench` results (40.7 ns/op classify, 425 ns/op basefee)
 - Multi-RPC health indicator (healthy / total endpoints)
 - Live event feed with color-coded OPP / BLOCK badges
 
 ```bash
-# 1. Start the Rust engine (serves Prometheus on :9091)
-cargo run --release --bin mev-engine --manifest-path core/Cargo.toml
-
-# Optional: enable Stage 2 revm fork validation in gRPC pipeline
-MEV_ENABLE_FORK_SIM=1 cargo run --release --bin mev-engine --manifest-path core/Cargo.toml
+# 1. Start the full pipeline (Go network node + Rust gRPC core)
+#    Go node serves Prometheus metrics on :9091
+#    Dashboard polls :9091 every 2 seconds
+make live
 
 # 2. Open dashboard in browser
 open dashboard/index.html
+
+# Alternative: start components individually
+cd network && go run ./cmd/mev-node/    # Go node (metrics on :9091)
+cd core && cargo run --release           # Rust gRPC core
 ```
 
 ---
