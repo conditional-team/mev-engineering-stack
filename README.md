@@ -91,6 +91,13 @@ The goal is not profitability, but engineering performance and system reliabilit
           │ FlashArb    │ ◄── Balancer V2 flash loans (0% fee)
           │ MultiDexRtr │ ◄── V2/V3/Sushi/Curve routing
           └─────────────┘
+
+### Deployed Contracts (Sepolia Testnet)
+
+| Contract | Address | Etherscan |
+|----------|---------|----------|
+| FlashArbitrage | `0x42a372E2f161e978ee9791F399c27c56D6CB55eb` | [Verified ✅](https://sepolia.etherscan.io/address/0x42a372e2f161e978ee9791f399c27c56d6cb55eb) |
+| MultiDexRouter | `0xB6F5A4cd9d0f97632Ef38781A1aaef0C965CAed6` | [Verified ✅](https://sepolia.etherscan.io/address/0xb6f5a4cd9d0f97632ef38781a1aaef0c965caed6) |
 ```
 
 ### Layer Breakdown

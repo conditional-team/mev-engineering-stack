@@ -106,9 +106,22 @@ forge test --gas-report   # Gas usage per function
 
 Tests cover critical security paths: callback origin validation, executor authorization, replay protection, and pause controls.
 
+## Deployed Contracts (Sepolia Testnet)
+
+| Contract | Address | Verified |
+|----------|---------|----------|
+| **FlashArbitrage** | [`0x42a372E2f161e978ee9791F399c27c56D6CB55eb`](https://sepolia.etherscan.io/address/0x42a372e2f161e978ee9791f399c27c56d6cb55eb) | ✅ |
+| **MultiDexRouter** | [`0xB6F5A4cd9d0f97632Ef38781A1aaef0C965CAed6`](https://sepolia.etherscan.io/address/0xb6f5a4cd9d0f97632ef38781a1aaef0c965caed6) | ✅ |
+
+Chain: Sepolia (11155111) · Deployer: `0xB99b17e0C69c9b8A3A7cbB72752A572B9ba34611` · Router set as executor.
+
 ## Deploy
 
 ```bash
+# Sepolia L1 (testnet)
+forge script script/Deploy.s.sol:DeployScript \
+  --rpc-url https://ethereum-sepolia-rpc.publicnode.com --broadcast
+
 # Arbitrum Sepolia (testnet) — uses mock Balancer vault
 forge script script/DeployArbitrum.s.sol:DeployArbitrumSepolia \
   --rpc-url $ARBITRUM_SEPOLIA_RPC --broadcast -vvvv
@@ -122,7 +135,7 @@ forge script script/DeployArbitrum.s.sol:DeployArbitrumMainnet \
 
 ## ⚠️ Production Deployment Requirements
 
-These contracts are **audited-ready but not yet deployed**. Going live requires:
+Contracts are **deployed and verified on Sepolia testnet**. Going to mainnet requires:
 
 1. **Professional security audit** — formal verification of callback logic and flash loan repayment paths
 2. **Dedicated Flashbots/MEV relay** — bundle submission to block builders (e.g., Flashbots Protect, MEV Blocker, Merkle)
