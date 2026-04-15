@@ -172,7 +172,7 @@ fn v2_amount_in_roundtrips_with_amount_out() {
 
 #[test]
 fn find_optimal_frontrun_v2_profitable() {
-    // Large victim swap into a balanced pool should be sandwichable
+    // Large victim swap into a balanced pool should be profitable to frontrun
     let pool = simulator::AMMPoolC {
         reserve0: 100_000_000_000,     // 100B units
         reserve1: 100_000_000_000,
@@ -190,7 +190,7 @@ fn find_optimal_frontrun_v2_profitable() {
     };
 
     let result = simulator::find_optimal_frontrun(&pool, &victim);
-    assert!(result.is_some(), "sandwich optimizer must find a solution");
+    assert!(result.is_some(), "optimizer must find a solution");
     let r = result.unwrap();
     assert_eq!(r.valid, 1, "result should be valid/profitable");
     assert!(r.frontrun_amount > 0, "frontrun must be > 0");

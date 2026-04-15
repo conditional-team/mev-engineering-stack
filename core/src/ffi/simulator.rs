@@ -39,10 +39,10 @@ pub struct VictimSwapC {
     pub _pad:           [u8; 7],
 }
 
-/// Sandwich simulation output — mirrors `SandwichResult` in amm_simulator.h
+/// Simulation output — mirrors `SimResult` in amm_simulator.h
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
-pub struct SandwichResultC {
+pub struct SimResultC {
     pub frontrun_amount: u64,
     pub backrun_amount:  u64,
     pub gross_profit:    i64,
@@ -124,13 +124,13 @@ extern "C" {
     fn amm_find_optimal_frontrun(
         pool:   *const AMMPoolC,
         victim: *const VictimSwapC,
-        out:    *mut SandwichResultC,
+        out:    *mut SimResultC,
     ) -> i32;
 
     fn amm_batch_find_optimal(
         pools:   *const AMMPoolC,
         victims: *const VictimSwapC,
-        results: *mut SandwichResultC,
+        results: *mut SimResultC,
         n:       u32,
     );
 
@@ -202,14 +202,14 @@ pub fn v3_amount_out(liquidity: u64, sqrt_price_x64: u64, zero_for_one: bool, fe
     { let _ = (liquidity, sqrt_price_x64, zero_for_one, fee_bps, amount_in); None }
 }
 
-/// Find optimal sandwich parameters for a single pool+victim pair.
+/// Find optimal frontrun parameters for a single pool+victim pair.
 ///
-/// Returns `Some(SandwichResultC)` when a profitable result is found,
+/// Returns `Some(SimResultC)` when a profitable result is found,
 /// `None` if the simulation produced no profitable opportunity.
-pub fn find_optimal_frontrun(pool: &AMMPoolC, victim: &VictimSwapC) -> Option<SandwichResultC> {
+pub fn find_optimal_frontrun(pool: &AMMPoolC, victim: &VictimSwapC) -> Option<SimResultC> {
     #[cfg(has_c_fast_path)]
     {
-        let mut result = SandwichResultC::default();
+        let mut result = SimResultC::default();
         let ok = unsafe {
             amm_find_optimal_frontrun(
                 pool   as *const _,
@@ -233,7 +233,7 @@ pub fn find_optimal_frontrun(pool: &AMMPoolC, victim: &VictimSwapC) -> Option<Sa
 pub fn batch_find_optimal(
     pools:   &[AMMPoolC],
     victims: &[VictimSwapC],
-    results: &mut [SandwichResultC],
+    results: &mut [SimResultC],
 ) {
     assert_eq!(pools.len(), victims.len());
     assert_eq!(pools.len(), results.len());

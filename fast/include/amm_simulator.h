@@ -3,7 +3,7 @@
  * amm_simulator.h — C++20 template-specialized AMM simulation kernel
  *
  * Provides constant-product (V2) and concentrated-liquidity (V3) AMM math
- * with a ternary-search optimal sandwich optimizer.
+ * with a ternary-search optimal frontrun sizing optimizer.
  *
  * All public symbols are exposed via a plain C ABI (extern "C") so Rust can
  * link against them without a cxx bridge.
@@ -126,7 +126,7 @@ struct AMMPool {
 };
 #pragma pack(pop)
 
-/// Input descriptor for a victim swap we want to sandwich
+/// Input descriptor for a target victim swap
 #pragma pack(push, 1)
 struct VictimSwap {
     uint8_t  pool_addr[20];  ///< Target pool address (matches an AMMPool)
@@ -138,9 +138,9 @@ struct VictimSwap {
 };
 #pragma pack(pop)
 
-/// Output of one sandwich simulation at a given frontrun amount
+/// Output of one simulation at a given frontrun amount
 #pragma pack(push, 1)
-struct SandwichResult {
+struct SimResult {
     uint64_t frontrun_amount;  ///< Optimal frontrun size
     uint64_t backrun_amount;   ///< Required backrun input amount
     int64_t  gross_profit;     ///< Gross profit before gas (can be negative)
@@ -237,9 +237,9 @@ namespace amm_math {
     return static_cast<uint64_t>(out);
 }
 
-/// Simulate the full 3-step sandwich at a given frontrun amount.
+/// Simulate the full 3-step frontrun/backrun cycle at a given frontrun amount.
 /// Returns gross_profit (int64, negative means loss).
-[[nodiscard]] static inline int64_t simulate_v2_sandwich(
+[[nodiscard]] static inline int64_t simulate_v2_pnl(
     const AMMPool&   pool,
     const VictimSwap& victim,
     uint64_t frontrun_amount
@@ -309,15 +309,15 @@ struct AMMSimulator;
 template<>
 struct AMMSimulator<PoolType::V2> {
     /// Ternary search over frontrun_amount ∈ [lo, hi] to maximise gross profit.
-    /// The V2 sandwich profit function is strictly unimodal (concave) in frontrun
+    /// The V2 profit function is strictly unimodal (concave) in frontrun
     /// amount, so ternary search converges to global optimum.
     ///
     /// 64 iterations → precision ≈ (hi - lo) / 3^64 ≈ sub-wei, more than enough.
-    static SandwichResult findOptimal(
+    static SimResult findOptimal(
         const AMMPool&    pool,
         const VictimSwap& victim
     ) noexcept {
-        SandwichResult result{};
+        SimResult result{};
 
         const uint64_t lo = 1u;
         // Max useful frontrun is bounded by half the reserve to avoid moving
@@ -335,8 +335,8 @@ struct AMMSimulator<PoolType::V2> {
             uint64_t m1 = a + range / 3u;
             uint64_t m2 = b - range / 3u;
 
-            int64_t p1 = amm_math::simulate_v2_sandwich(pool, victim, m1);
-            int64_t p2 = amm_math::simulate_v2_sandwich(pool, victim, m2);
+            int64_t p1 = amm_math::simulate_v2_pnl(pool, victim, m1);
+            int64_t p2 = amm_math::simulate_v2_pnl(pool, victim, m2);
 
             if (p1 < p2) {
                 a = m1;
@@ -346,7 +346,7 @@ struct AMMSimulator<PoolType::V2> {
         }
 
         uint64_t optimal = (a + b) / 2u;
-        int64_t  profit  = amm_math::simulate_v2_sandwich(pool, victim, optimal);
+        int64_t  profit  = amm_math::simulate_v2_pnl(pool, victim, optimal);
 
         result.frontrun_amount = optimal;
         result.gross_profit    = profit;
@@ -376,11 +376,11 @@ struct AMMSimulator<PoolType::V2> {
 
 template<>
 struct AMMSimulator<PoolType::V3> {
-    static SandwichResult findOptimal(
+    static SimResult findOptimal(
         const AMMPool&    pool,
         const VictimSwap& victim
     ) noexcept {
-        SandwichResult result{};
+        SimResult result{};
 
         const uint64_t liq = pool.reserve0;
         const uint64_t sp  = pool.reserve1;
@@ -466,16 +466,16 @@ uint64_t amm_v3_amount_out(
         liquidity, sqrt_price_x64, zero_for_one, fee_bps, amount_in);
 }
 
-/// Find optimal sandwich parameters for a single pool+victim pair.
+/// Find optimal frontrun parameters for a single pool+victim pair.
 /// Returns 1 on success (profitable result found), 0 otherwise.
 int amm_find_optimal_frontrun(
     const AMMPool*    pool,
     const VictimSwap* victim,
-    SandwichResult*   out
+    SimResult*   out
 ) {
     if (!pool || !victim || !out) return 0;
 
-    SandwichResult r = pool->is_v3
+    SimResult r = pool->is_v3
         ? AMMSimulator<PoolType::V3>::findOptimal(*pool, *victim)
         : AMMSimulator<PoolType::V2>::findOptimal(*pool, *victim);
 
@@ -488,7 +488,7 @@ int amm_find_optimal_frontrun(
 void amm_batch_find_optimal(
     const AMMPool*    pools,
     const VictimSwap* victims,
-    SandwichResult*   results,
+    SimResult*   results,
     uint32_t          n
 ) {
     if (!pools || !victims || !results || n == 0) return;

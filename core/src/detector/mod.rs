@@ -4,7 +4,6 @@ mod arbitrage;
 mod backrun;
 mod liquidation;
 pub mod multi_threaded;
-pub mod sandwich;
 
 pub use arbitrage::ArbitrageDetector;
 pub use backrun::BackrunDetector;
