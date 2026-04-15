@@ -27,30 +27,6 @@ pub struct AMMPoolC {
     pub _pad:          [u8; 3],
 }
 
-/// Victim swap descriptor — mirrors `VictimSwap` in amm_simulator.h
-#[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
-pub struct VictimSwapC {
-    pub pool_addr:      [u8; 20],
-    pub amount_in:      u64,
-    pub reserve0_snap:  u64,
-    pub reserve1_snap:  u64,
-    pub zero_for_one:   u8,
-    pub _pad:           [u8; 7],
-}
-
-/// Simulation output — mirrors `SimResult` in amm_simulator.h
-#[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
-pub struct SimResultC {
-    pub frontrun_amount: u64,
-    pub backrun_amount:  u64,
-    pub gross_profit:    i64,
-    pub net_profit:      i64,
-    pub valid:           u8,
-    pub _pad:            [u8; 7],
-}
-
 /// Per-hop pool info — mirrors `HopPool` in pathfinder.h
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
@@ -121,19 +97,6 @@ extern "C" {
         amount_in:       u64,
     ) -> u64;
 
-    fn amm_find_optimal_frontrun(
-        pool:   *const AMMPoolC,
-        victim: *const VictimSwapC,
-        out:    *mut SimResultC,
-    ) -> i32;
-
-    fn amm_batch_find_optimal(
-        pools:   *const AMMPoolC,
-        victims: *const VictimSwapC,
-        results: *mut SimResultC,
-        n:       u32,
-    );
-
     // Pathfinder — PoolGraph is an opaque large struct; callers must allocate it
     #[allow(dead_code)]
     fn pathfinder_token_fp(addr20: *const u8) -> u64;
@@ -200,61 +163,6 @@ pub fn v3_amount_out(liquidity: u64, sqrt_price_x64: u64, zero_for_one: bool, fe
     }
     #[cfg(not(has_c_fast_path))]
     { let _ = (liquidity, sqrt_price_x64, zero_for_one, fee_bps, amount_in); None }
-}
-
-/// Find optimal frontrun parameters for a single pool+victim pair.
-///
-/// Returns `Some(SimResultC)` when a profitable result is found,
-/// `None` if the simulation produced no profitable opportunity.
-pub fn find_optimal_frontrun(pool: &AMMPoolC, victim: &VictimSwapC) -> Option<SimResultC> {
-    #[cfg(has_c_fast_path)]
-    {
-        let mut result = SimResultC::default();
-        let ok = unsafe {
-            amm_find_optimal_frontrun(
-                pool   as *const _,
-                victim as *const _,
-                &mut result,
-            )
-        };
-        return if ok == 1 { Some(result) } else { None };
-    }
-    #[cfg(not(has_c_fast_path))]
-    { let _ = (pool, victim); None }
-}
-
-/// Batch version of `find_optimal_frontrun`.
-///
-/// Processes `pools.len()` pairs and writes results into `results`.
-/// `pools`, `victims`, and `results` must all have the same length.
-///
-/// # Panics
-/// Panics if `pools.len() != victims.len()` or `pools.len() != results.len()`.
-pub fn batch_find_optimal(
-    pools:   &[AMMPoolC],
-    victims: &[VictimSwapC],
-    results: &mut [SimResultC],
-) {
-    assert_eq!(pools.len(), victims.len());
-    assert_eq!(pools.len(), results.len());
-
-    #[cfg(has_c_fast_path)]
-    unsafe {
-        amm_batch_find_optimal(
-            pools.as_ptr(),
-            victims.as_ptr(),
-            results.as_mut_ptr(),
-            pools.len() as u32,
-        );
-    }
-    #[cfg(not(has_c_fast_path))]
-    {
-        // Rust-only fallback: call the safe single-pair function repeatedly
-        for i in 0..pools.len() {
-            results[i] = find_optimal_frontrun(&pools[i], &victims[i])
-                .unwrap_or_default();
-        }
-    }
 }
 
 /// Compute a 64-bit fingerprint of a 20-byte EVM address.

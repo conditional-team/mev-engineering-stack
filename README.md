@@ -34,7 +34,7 @@ This project explores how far a single developer can push across five languages:
 - **Lock-free concurrency** — CAS queues, atomic operations, zero-allocation hot paths at 40.7 ns/op
 - **Multi-language architecture tradeoffs** — gRPC vs FFI, Go scheduler vs cgo, C++ templates vs Rust generics, Yul vs Solidity
 - **Two-stage simulation** — AMM math fast filter (~35 ns) → revm 8.0 fork execution (~50–200 µs) for full EVM validation
-- **C++ simulation kernel** — template-specialized AMM math with `__uint128_t` overflow protection, ternary-search optimal frontrun sizing (64 iterations, sub-wei precision), multi-hop BFS path optimizer (SoA pool graph, 256-pool cap, FNV-1a fingerprinting)
+- **C++ simulation kernel** — template-specialized AMM math with `__uint128_t` overflow protection, multi-hop BFS path optimizer (SoA pool graph, 256-pool cap, FNV-1a fingerprinting)
 - **Production-grade fault tolerance** — exponential backoff, graceful degradation, monitor-only fallback
 
 The goal is not profitability, but engineering performance, cross-language execution depth, and system reliability.
@@ -112,7 +112,7 @@ The goal is not profitability, but engineering performance, cross-language execu
 |-------|----------|---------|-------------|
 | **network/** | Go 1.21 | Mempool monitoring, tx classification, Flashbots relay, Prometheus metrics | `cmd/mev-node/main.go` |
 | **core/** | Rust 2021 | MEV detection (arbitrage + backrun + liquidation), AMM simulation (V2 constant-product + V3 concentrated liquidity), bundle construction, gRPC server | `src/main.rs` |
-| **fast/** | C++20 + C | AMM simulation kernel (V2/V3 math), multi-hop BFS path optimizer, ternary-search optimal frontrun sizing (64 iters); SIMD keccak, RLP encoding, lock-free MPSC queue, arena allocator | `include/amm_simulator.h`, `src/keccak.c` |
+| **fast/** | C++20 + C | AMM simulation kernel (V2/V3 math), multi-hop BFS path optimizer; SIMD keccak, RLP encoding, lock-free MPSC queue, arena allocator | `include/amm_simulator.h`, `src/keccak.c` |
 | **contracts/** | Solidity + Yul | Flash loan arbitrage (Balancer V2, 0% fee), multi-DEX routing (direct pool calls), inline Yul assembly, YulUtils library | `src/FlashArbitrage.sol` |
 | **proto/** | Protocol Buffers | Cross-language service contract (Go ↔ Rust) | `mev.proto` |
 
@@ -470,7 +470,7 @@ SIMD-accelerated C primitives plus C++20 AMM simulation kernel, all linked into 
 
 | File | Function | Technique | C ABI Export |
 |------|----------|-----------|---------------|
-| `amm_simulator.h/cpp` | V2 constant-product + V3 approximate AMM math; ternary-search optimal frontrun sizing (64 iters, sub-wei precision) | `__uint128_t` intermediate overflow protection, template specialization V2/V3 | `amm_v2_amount_out`, `amm_find_optimal_frontrun`, `amm_batch_find_optimal` |
+| `amm_simulator.h/cpp` | V2 constant-product + V3 approximate AMM math | `__uint128_t` intermediate overflow protection, template specialization V2/V3 | `amm_v2_amount_out`, `amm_v2_amount_in`, `amm_v3_amount_out` |
 | `pathfinder.h/cpp` | Multi-hop BFS path finder (SoA pool graph, 256-pool cap, 48-iter ternary search) | FNV-1a address fingerprints, struct-of-arrays pool graph, stack-allocated BFS queue | `pathfinder_find_best`, `pathfinder_graph_upsert`, `pathfinder_graph_reset` |
 
 Compile flags: `-O3 -march=native -mavx2 -msse4.2 -flto -falign-functions=64`
@@ -623,7 +623,7 @@ GitHub Actions pipeline with **4 parallel jobs** — each layer builds and tests
 |----------|-----------|----------|
 | **5 languages** | Go for concurrent network I/O, Rust for safe high-perf compute, C++ for AMM simulation kernel + path optimizer, C for SIMD hot paths, Solidity for on-chain | Operational complexity vs optimal tool per domain |
 | **gRPC over FFI for Go↔Rust** | Avoids cgo thread pinning → preserves Go scheduler fairness. Isolates failure domains (process boundary) | Adds ~5–20 µs overhead, acceptable vs ms-level network latency |
-| **C++ AMM kernel over pure Rust** | `__uint128_t` overflow safety for V2 math at live reserve scale (1e20), ternary-search frontrun sizing (64 iters) compiles with MSVC + GCC + Clang | Adds build dependency on C++20 compiler; `cc` crate handles cross-platform compilation |
+| **C++ AMM kernel over pure Rust** | `__uint128_t` overflow safety for V2 math at live reserve scale (1e20), compiles with MSVC + GCC + Clang | Adds build dependency on C++20 compiler; `cc` crate handles cross-platform compilation |
 | **revm over forked geth** | Pure Rust, no cgo dependency, deterministic gas. Two-stage: AMM math filter (35 ns) screens candidates, revm fork execution validates survivors | revm fork adds ~50–200 µs per call, justified only for Stage 1 survivors |
 | **Balancer flash loans** | 0% fee vs Aave's 0.09%. When margins are basis points, eliminating the fee is critical | Balancer pool TVL limits flash loan size |
 | **Constant-product fast filter** | x·y=k at 35 ns screens candidates before expensive simulation. Only survivors hit EVM | Misses V3 concentrated liquidity edge cases |
@@ -659,7 +659,7 @@ This stack extracts **constructive MEV only**:
 | Type | Status | Impact |
 |------|--------|--------|
 | **Arbitrage** | ✅ Supported | Aligns prices across DEXs — improves market efficiency |
-| **Backrun** | ✅ Supported | Captures residual slippage after large swaps — no victim |
+| **Backrun** | ✅ Supported | Captures residual slippage after large swaps — no harm to original trader |
 | **Liquidation** | ✅ Supported | Closes undercollateralized positions — maintains protocol solvency |
 | **Front-running** | ❌ Not implemented | Copy and front-run pending transactions — predatory |
 | **JIT liquidity** | ❌ Not implemented | Temporary liquidity manipulation — market distortion |
@@ -681,7 +681,7 @@ mev-engineering-stack/
 │   │   ├── arbitrum/       # Arbitrum L2 engine: 3-DEX pool discovery (V3/Sushi/Camelot), triangular arb, Balancer V2 flash executor
 │   │   ├── ffi/
 │   │   │   ├── hot_path.rs     # C FFI bindings (keccak, RLP, SIMD, queue, address ops)
-│   │   │   └── simulator.rs    # C++ AMM FFI bindings (v2_amount_out, find_optimal_frontrun) + pure-Rust fallbacks
+│   │   │   └── simulator.rs    # C++ AMM FFI bindings (v2_amount_out, v2_amount_in, v3_amount_out) + pure-Rust fallbacks
 │   │   └── mempool/        # WebSocket data handling
 │   └── benches/            # Criterion benchmarks (7 groups)
 ├── network/                # Go — mempool monitor, pipeline, relay

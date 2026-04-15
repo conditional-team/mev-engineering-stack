@@ -170,59 +170,6 @@ fn v2_amount_in_roundtrips_with_amount_out() {
     );
 }
 
-#[test]
-fn find_optimal_frontrun_v2_profitable() {
-    // Large victim swap into a balanced pool should be profitable to frontrun
-    let pool = simulator::AMMPoolC {
-        reserve0: 100_000_000_000,     // 100B units
-        reserve1: 100_000_000_000,
-        fee_bps: 3000,
-        is_v3: 0,
-        ..Default::default()
-    };
-
-    let victim = simulator::VictimSwapC {
-        amount_in: 1_000_000_000,      // 1B units (1% of pool)
-        reserve0_snap: pool.reserve0,
-        reserve1_snap: pool.reserve1,
-        zero_for_one: 1,
-        ..Default::default()
-    };
-
-    let result = simulator::find_optimal_frontrun(&pool, &victim);
-    assert!(result.is_some(), "optimizer must find a solution");
-    let r = result.unwrap();
-    assert_eq!(r.valid, 1, "result should be valid/profitable");
-    assert!(r.frontrun_amount > 0, "frontrun must be > 0");
-    assert!(r.gross_profit > 0, "gross profit must be positive");
-}
-
-#[test]
-fn find_optimal_frontrun_tiny_victim_not_profitable() {
-    // Tiny victim swap: fees eat all profit
-    let pool = simulator::AMMPoolC {
-        reserve0: 100_000_000_000,
-        reserve1: 100_000_000_000,
-        fee_bps: 3000,
-        is_v3: 0,
-        ..Default::default()
-    };
-
-    let victim = simulator::VictimSwapC {
-        amount_in: 100, // negligible
-        reserve0_snap: pool.reserve0,
-        reserve1_snap: pool.reserve1,
-        zero_for_one: 1,
-        ..Default::default()
-    };
-
-    let result = simulator::find_optimal_frontrun(&pool, &victim);
-    // May or may not return Some, but if it does, profit should be <= 0
-    if let Some(r) = result {
-        assert_eq!(r.valid, 0, "tiny victim should not be profitable");
-    }
-}
-
 // ─── RDTSC ──────────────────────────────────────────────────────────────────
 
 #[test]
