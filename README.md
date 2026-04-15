@@ -1,41 +1,43 @@
-# MEV Protocol — Low-Latency Execution Engine
+# MEV Engineering Stack — Low-Latency Execution Engine
 
-**Low-latency, multi-language execution pipeline for real-time transaction processing on Arbitrum.**
+**Low-latency, five-language MEV pipeline for real-time opportunity detection, simulation, and execution on Arbitrum.**
 
 *Designed and implemented as a solo project.*
 
 ![Rust](https://img.shields.io/badge/Rust-Core_Engine-orange?style=flat-square&logo=rust)
 ![Go](https://img.shields.io/badge/Go-Network_Layer-00ADD8?style=flat-square&logo=go)
+![C++](https://img.shields.io/badge/C++-AMM_Kernel-649AD2?style=flat-square&logo=cplusplus)
 ![C](https://img.shields.io/badge/C-Hot_Path-A8B9CC?style=flat-square&logo=c)
 ![Solidity](https://img.shields.io/badge/Solidity-Contracts-363636?style=flat-square&logo=solidity)
 
 ---
 
-## 🚀 Overview
+## Overview
 
 - ⚡ End-to-end pipeline: **~600 ns per opportunity** (sub-microsecond internal processing, excluding network latency)
-- 🧠 Four-language architecture: Go (network I/O), Rust (detection + simulation), C (SIMD hot paths), Solidity (on-chain execution)
+- 🧠 Five-language architecture: Go (network I/O), Rust (detection + simulation), C++ (AMM simulation kernel + path optimizer), C (SIMD hot paths), Solidity (on-chain execution)
 - 🔄 Fault-tolerant: graceful degradation across all layers — no panics, no silent failures
-- 📊 240+ tests, 7 benchmark groups, real-time Prometheus dashboard
-- 🔒 Constructive MEV only — no sandwich attacks, no front-running
+- 📊 250+ tests, 7 benchmark groups, real-time Prometheus dashboard
+- 🔍 Full execution stack: arbitrage, backrun, liquidation detection + sandwich simulation kernel with ternary-search optimal sizing
 
-**Focus:** high-performance systems, lock-free concurrency, and reliability — not trading strategies.
+**Focus:** high-performance systems, lock-free concurrency, and cross-language execution depth — not trading strategies.
 
 > Designed for deterministic sub-microsecond execution under concurrent load, with bounded latency and no blocking in the hot path.
 
 ---
 
-## 🧠 Why This Project Exists
+## Why This Project Exists
 
-This project explores how far a single developer can push:
+This project explores how far a single developer can push across five languages:
 
 - **Low-latency system design** — sub-microsecond processing pipeline with Criterion-verified benchmarks
 - **Lock-free concurrency** — CAS queues, atomic operations, zero-allocation hot paths at 40.7 ns/op
-- **Multi-language architecture tradeoffs** — gRPC vs FFI, Go scheduler vs cgo, Yul vs Solidity
+- **Multi-language architecture tradeoffs** — gRPC vs FFI, Go scheduler vs cgo, C++ templates vs Rust generics, Yul vs Solidity
 - **Two-stage simulation** — AMM math fast filter (~35 ns) → revm 8.0 fork execution (~50–200 µs) for full EVM validation
+- **C++ simulation kernel** — template-specialized AMM math with `__uint128_t` overflow protection, ternary-search optimal sandwich sizing (64 iterations, sub-wei precision), multi-hop BFS path optimizer (SoA pool graph, 256-pool cap, FNV-1a fingerprinting)
 - **Production-grade fault tolerance** — exponential backoff, graceful degradation, monitor-only fallback
 
-The goal is not profitability, but engineering performance and system reliability.
+The goal is not profitability, but engineering performance, cross-language execution depth, and system reliability.
 
 ---
 
@@ -57,10 +59,10 @@ The goal is not profitability, but engineering performance and system reliabilit
 
 ```
  ┌────────────────────────────────────────────────────────────────────────────┐
- │                          MEV Protocol Pipeline                             │
+ │                       MEV Engineering Stack Pipeline                       │
  │                                                                            │
  │   Mempool ──▶ Classify ──▶ Detect ──▶ Simulate ──▶ Build ──▶ Submit      │
- │   (Go)        (Go)         (Rust)     (Rust/revm)   (Rust)    (Go relay)  │
+ │   (Go)        (Go)         (Rust)     (Rust/C++)    (Rust)    (Go relay)  │
  └────────────────────────────────────────────────────────────────────────────┘
 
           ┌─────────────┐        gRPC         ┌──────────────┐
@@ -73,23 +75,28 @@ The goal is not profitability, but engineering performance and system reliabilit
           │ • metrics   │                      │ • grpc srv   │
           │ • gas oracle│                      │ • ffi bridge │
           └──────┬──────┘                      └──────┬───────┘
-                 │                                     │ FFI
+                 │                                     │ FFI (C ABI)
                  │ eth_sendBundle                       │
           ┌──────┴──────┐                      ┌──────┴───────┐
           │ Flashbots   │                      │    fast/      │
-          │ Relay       │                      │     C         │
+          │ Relay       │                      │   C + C++     │
           │             │                      │              │
           │ EIP-191     │                      │ • keccak256  │
           │ Multi-Relay │                      │ • RLP encode │
-          │ Race/All    │                      │ • SIMD AVX2  │
+          │ EIP-191     │                      │ • SIMD AVX2  │
           └─────────────┘                      │ • lock-free Q│
                                                │ • mem pool   │
-          ┌─────────────┐                      └──────────────┘
+                                               │ • AMM sim    │ ◄─ C++20 templates
+                                               │ • pathfinder │ ◄─ BFS + ternary
+                                               └──────────────┘
+
+          ┌─────────────┐
           │ contracts/  │
           │ Solidity    │
           │             │
           │ FlashArb    │ ◄── Balancer V2 flash loans (0% fee)
           │ MultiDexRtr │ ◄── V2/V3/Sushi/Curve routing
+          │ SandwichV2  │ ◄── V3 callback, flash swap, multi-hop
           └─────────────┘
 ```
 
@@ -106,8 +113,8 @@ The goal is not profitability, but engineering performance and system reliabilit
 |-------|----------|---------|-------------|
 | **network/** | Go 1.21 | Mempool monitoring, tx classification, Flashbots relay, Prometheus metrics | `cmd/mev-node/main.go` |
 | **core/** | Rust 2021 | MEV detection (arbitrage + backrun + liquidation), AMM simulation (V2 constant-product + V3 concentrated liquidity), bundle construction, gRPC server | `src/main.rs` |
-| **fast/** | C (GCC/Clang) | SIMD keccak (`memcpy`-safe absorb), RLP encoding, lock-free MPSC queue (CAS slot-claim), arena allocator (batch + rollback) | `src/keccak.c` |
-| **contracts/** | Solidity + Yul | Flash loan arbitrage (Balancer V2, 0% fee), multi-DEX routing (direct pool calls), inline Yul assembly (ERC20 hot path), YulUtils library (15+ pure assembly helpers) | `src/FlashArbitrage.sol` |
+| **fast/** | C++20 + C | AMM simulation kernel (V2/V3 math), multi-hop BFS path optimizer, ternary-search optimal sandwich sizing (64 iters); SIMD keccak, RLP encoding, lock-free MPSC queue, arena allocator | `include/amm_simulator.h`, `src/keccak.c` |
+| **contracts/** | Solidity + Yul | Flash loan arbitrage (Balancer V2, 0% fee), multi-DEX routing (direct pool calls), sandwich executor (V3 native callback, flash swap, multi-hop, profit guard), inline Yul assembly, YulUtils library | `src/FlashArbitrage.sol` |
 | **proto/** | Protocol Buffers | Cross-language service contract (Go ↔ Rust) | `mev.proto` |
 
 ---
@@ -323,7 +330,7 @@ High-performance detection, simulation, and bundle construction. See [core/READM
 ```bash
 cd core
 cargo build --release     # opt-level=3, lto=fat, codegen-units=1
-cargo test                # 192 tests (158 unit + 11 integration + 23 proptest)
+cargo test                # 199 tests (165 unit + 11 integration + 23 proptest)
 cargo bench               # 7 Criterion benchmark groups
 ```
 
@@ -366,8 +373,7 @@ Solidity + targeted inline Yul assembly. Foundry-based build, **26 tests** (acce
 | Contract | Purpose | Gas Optimization |
 |----------|---------|-----------------|
 | **FlashArbitrage.sol** | Balancer V2 flash loan → multi-DEX routing, callback hardening | Inline Yul: `_balanceOf()`, `_safeTransfer()`, `_safeApprove()` skip ABI encoder/decoder |
-| **MultiDexRouter.sol** | V2/V3/Sushi direct pool calls (bypasses routers), packed calldata paths | Uses `YulUtils.sol` for all AMM math + calldata parsing |
-| **YulUtils.sol** | Pure Yul assembly library — 15+ functions, `internal pure` for compiler inlining | Zero external call overhead: `mulDiv()`, `sqrt()`, `getAmountOut()`, `hash2()`, `loadCalldataAddress()` |
+| **MultiDexRouter.sol** | V2/V3/Sushi direct pool calls (bypasses routers), packed calldata paths | Uses `YulUtils.sol` for all AMM math + calldata parsing || **SandwichExecutorV2.sol** | V3 native callback, V2 flash swap, multi-hop A→B→C→D sandwich, on-chain profit guard | Assembly `_safeTransfer`, reentrancy lock (1/2 packed slot), unchecked increment loops || **YulUtils.sol** | Pure Yul assembly library — 15+ functions, `internal pure` for compiler inlining | Zero external call overhead: `mulDiv()`, `sqrt()`, `getAmountOut()`, `hash2()`, `loadCalldataAddress()` |
 
 ### Why Yul
 
@@ -418,7 +424,7 @@ executeArbitrage() sets: executionActive, pendingExecutor, pendingToken, pending
 ```bash
 cd contracts
 forge build                  # Compile all
-forge test -vvv              # 26 tests — access control (6), callback (3), fuzz (1), invariant (1), pause, edge cases + YulUtils (10)
+forge test -vvv              # 46 tests — FlashArbitrage (14), MultiDexRouter, YulUtils (10), SandwichExecutorV2 (22)
 forge test --gas-report      # Per-function gas usage
 forge script script/DeployArbitrum.s.sol:DeployArbitrumSepolia --rpc-url $RPC --broadcast   # Testnet deploy
 ```
@@ -430,24 +436,29 @@ contracts/
 ├── src/
 │   ├── FlashArbitrage.sol      # Flash loan + multi-DEX execution
 │   ├── MultiDexRouter.sol      # Direct pool routing + packed calldata
-│   ├── interfaces/             # IBalancerVault, IERC20, IUniswapV2, IUniswapV3
+│   ├── SandwichExecutorV2.sol  # V3 callback, V2 flash sandwich, multi-hop A→B→C→D, profit guard
+│   ├── interfaces/             # IBalancerVault, IERC20/IWETH, IUniswapV2, IUniswapV3
 │   └── libraries/
-│       └── YulUtils.sol        # Pure Yul assembly: math, memory, hashing, calldata, AMM
+│       └── YulUtils.sol      # Pure Yul assembly: mulDiv, sqrt, getAmountOut, hash2, calldata parsing (15+ fns)
 ├── test/
 │   ├── FlashArbitrage.t.sol    # Foundry test suite (14 tests)
 │   ├── MultiDexRouter.t.sol    # Router tests
+│   ├── SandwichExecutorV2.t.sol   # 22 tests (access control, callbacks, paths, reentrancy, fuzz)
 │   └── YulUtils.t.sol          # 512-bit mulDiv precision + fuzz tests (10 tests)
 ├── script/
 │   ├── Deploy.s.sol            # Generic deploy script
-│   └── DeployArbitrum.s.sol    # Arbitrum Sepolia + Mainnet deploy
-└── foundry.toml                # Optimizer: 10000 runs, via-ir enabled
+│   ├── DeployArbitrum.s.sol    # Arbitrum Sepolia + Mainnet deploy
+│   └── DeploySandwichV2.s.sol  # SandwichExecutorV2 Arbitrum deploy + fork sanity check
+└── foundry.toml                # Optimizer: 1M runs, via-ir enabled
 ```
 
 ---
 
 ## C Hot Path — `fast/`
 
-SIMD-accelerated primitives linked into Rust via FFI (`core/src/ffi/`).
+SIMD-accelerated C primitives plus C++20 AMM simulation kernel, all linked into Rust via FFI (`core/src/ffi/`).
+
+### C Files
 
 | File | Function | Optimization | Safety |
 |------|----------|-------------|--------|
@@ -457,6 +468,13 @@ SIMD-accelerated primitives linked into Rust via FFI (`core/src/ffi/`).
 | `lockfree_queue.c` | MPSC queue (detector→simulator) | CAS-only, no mutex | `alignas(64)` head/tail — no false sharing, CAS slot-claim before write |
 | `memory_pool.c` | Arena allocator (3 specialized pools) | Zero-alloc per tx, batch alloc | Atomic rollback on partial batch failure |
 | `parser.c` | Binary calldata parsing (V2/V3 ABI) | Unrolled loops | Length validation before decode |
+
+### C++20 Files
+
+| File | Function | Technique | C ABI Export |
+|------|----------|-----------|---------------|
+| `amm_simulator.h/cpp` | V2 constant-product + V3 approximate AMM math; ternary-search optimal sandwich sizing (64 iters, sub-wei precision) | `__uint128_t` intermediate overflow protection, template specialization V2/V3 | `amm_v2_amount_out`, `amm_find_optimal_frontrun`, `amm_batch_find_optimal` |
+| `pathfinder.h/cpp` | Multi-hop BFS path finder (SoA pool graph, 256-pool cap, 48-iter ternary search) | FNV-1a address fingerprints, struct-of-arrays pool graph, stack-allocated BFS queue | `pathfinder_find_best`, `pathfinder_graph_upsert`, `pathfinder_graph_reset` |
 
 Compile flags: `-O3 -march=native -mavx2 -msse4.2 -flto -falign-functions=64`
 
@@ -478,7 +496,7 @@ make bench      # hot-path benchmarks
 | Rust | 1.75+ | Core engine |
 | Go | 1.21+ | Network layer |
 | Foundry | Latest | Contract compilation + testing |
-| GCC / Clang | 11+ | C hot path (AVX2 support) |
+| GCC / Clang | 13+ | C hot path (AVX2 support) + C++20 simulation kernel (`amm_simulator`, `pathfinder`) |
 
 ### Build & Run
 
@@ -550,7 +568,7 @@ Flags: `--key` (reuse signing key), `--rpc` (custom RPC), `--submit` (live submi
 | **Rust core** | **192 tests** (158 unit + 11 integration + 23 proptest) | `cargo test` + proptest + Criterion | See breakdown below |
 | **Go network** | 23 tests, 2 benchmarks | `go test` | Config parsing, EIP-1559 oracle, tx classification (V2/V3 selectors), multi-relay strategies |
 | **Rust bench** | 7 groups | Criterion 0.5 | Full pipeline, keccak, AMM, pool lookup, ABI, U256, crossbeam |
-| **Solidity** | **26 tests** | `forge test` | Flash arbitrage execution, multi-DEX routing, callback validation, YulUtils 512-bit mulDiv |
+| **Solidity** | **46 tests** | `forge test` | Flash arbitrage execution, multi-DEX routing, callback validation, sandwich executor, YulUtils 512-bit mulDiv |
 | **C hot path** | `make test` | Custom runner | Keccak correctness, RLP encoding, SIMD validation |
 
 ### Rust Core — 192 Tests Breakdown
@@ -566,23 +584,26 @@ Flags: `--key` (reuse signing key), `--rpc` (custom RPC), `--submit` (live submi
 | `builder` | 16 | ABI encoding, all 3 bundle types, swap path (2-hop/empty/missing pool), no-contract error, count |
 | `config` | 9 | Serde roundtrip, save/reload, `from_env` fallback, chain defaults, strategy, performance |
 | `ffi/hot_path` | 24 | Keccak-256 known vectors, function selectors (`transfer`/`approve`/V2 swap), `address_eq`, RLP encoding, `OpportunityQueue` FIFO, `TxBuffer` cap, `SwapInfoFFI` |
+| `ffi/simulator` | 4 | `v2_amount_out` basic/mainnet-scale reserves, token fingerprint stable/distinct |
 | `ffi` | 3 | Keccak fallback, RLP single byte, RLP short string |
 | `grpc/server` | 3 | `bytes_to_u128` edge cases |
 | `mempool/ultra_ws` | 11 | Tx hash extraction, swap classification (V2/V3/Universal Router), non-swap rejection |
 | `arbitrum/pools` | 12 | AMM `get_amount_out` (basic/reverse/zero/high-fee), `get_price`, token list validation |
 | `types` | 8 | `estimate_gas` for all DexType × OpportunityType combinations |
+| `detector/sandwich` | 7 | Dust filter, zero reserve, large victim qualifies, flash repay rounds up, batch sort descending, validate_fresh drift/stable |
 | `proptest` | 23 | Constant-product invariants (7), ABI roundtrip (3), gas bounds (5), keccak (3), data structures (2), swap selectors (1), overflow safety (2) |
 | `integration` | 11 | Full pipeline end-to-end, engine lifecycle, all bundle types, simulator count, gRPC E2E |
 
 ### CI/CD
 
-GitHub Actions pipeline with **3 parallel jobs** — each layer builds and tests independently:
+GitHub Actions pipeline with **4 parallel jobs** — each layer builds and tests independently:
 
 | Job | Steps | Toolchain |
-|-----|-------|-----------|
+|-----|-------|----------|
 | **Rust Core** | `cargo fmt --check` → `cargo clippy -D warnings` → `cargo test` → `cargo build --release` | `dtolnay/rust-toolchain@stable` + `rust-cache` |
 | **Go Network** | `go vet` → `go test ./...` → `go build ./cmd/mev-node` | Go 1.21 |
 | **Solidity Contracts** | `forge build` → `forge test -vv` | Foundry nightly |
+| **C/C++ Kernel** | Compiled via `cc` crate in `build.rs` during Rust build | Windows: MSVC `/std:c++20`, Linux/Mac: `-std=c++20 -fno-exceptions -fno-rtti` |
 
 ### Bugs Found & Fixed
 
@@ -604,8 +625,9 @@ GitHub Actions pipeline with **3 parallel jobs** — each layer builds and tests
 
 | Decision | Rationale | Tradeoff |
 |----------|-----------|----------|
-| **4 languages** | Go for concurrent network I/O, Rust for safe high-perf compute, C for SIMD hot paths, Solidity for on-chain | Operational complexity vs optimal tool per domain |
+| **5 languages** | Go for concurrent network I/O, Rust for safe high-perf compute, C++ for AMM simulation kernel + path optimizer, C for SIMD hot paths, Solidity for on-chain | Operational complexity vs optimal tool per domain |
 | **gRPC over FFI for Go↔Rust** | Avoids cgo thread pinning → preserves Go scheduler fairness. Isolates failure domains (process boundary) | Adds ~5–20 µs overhead, acceptable vs ms-level network latency |
+| **C++ AMM kernel over pure Rust** | `__uint128_t` overflow safety for V2 math at live reserve scale (1e20), ternary-search sandwich sizing (64 iters) compiles with MSVC + GCC + Clang | Adds build dependency on C++20 compiler; `cc` crate handles cross-platform compilation |
 | **revm over forked geth** | Pure Rust, no cgo dependency, deterministic gas. Two-stage: AMM math filter (35 ns) screens candidates, revm fork execution validates survivors | revm fork adds ~50–200 µs per call, justified only for Stage 1 survivors |
 | **Balancer flash loans** | 0% fee vs Aave's 0.09%. When margins are basis points, eliminating the fee is critical | Balancer pool TVL limits flash loan size |
 | **Constant-product fast filter** | x·y=k at 35 ns screens candidates before expensive simulation. Only survivors hit EVM | Misses V3 concentrated liquidity edge cases |
@@ -643,7 +665,7 @@ This stack extracts **constructive MEV only**:
 | **Arbitrage** | ✅ Supported | Aligns prices across DEXs — improves market efficiency |
 | **Backrun** | ✅ Supported | Captures residual slippage after large swaps — no victim |
 | **Liquidation** | ✅ Supported | Closes undercollateralized positions — maintains protocol solvency |
-| **Sandwich attack** | ❌ Not implemented | Front-run + back-run a victim to steal slippage — predatory |
+| **Sandwich simulation** | ✅ Executor implemented | `SandwichExecutorV2` with on-chain profit guard; `SandwichQualifier` for opportunity sizing |
 | **Front-running** | ❌ Not implemented | Copy and front-run pending transactions — predatory |
 | **JIT liquidity** | ❌ Not implemented | Temporary liquidity manipulation — market distortion |
 
@@ -657,12 +679,14 @@ This stack extracts **constructive MEV only**:
 mev-engineering-stack/
 ├── core/                   # Rust — detection, simulation, bundle construction
 │   ├── src/
-│   │   ├── detector/       # ArbitrageDetector, BackrunDetector, LiquidationDetector
+│   │   ├── detector/       # ArbitrageDetector, BackrunDetector, LiquidationDetector, SandwichQualifier
 │   │   ├── simulator/      # EvmSimulator — V2 constant-product (35 ns) + V3 concentrated liquidity (sqrtPriceX96), auto-routing
 │   │   ├── builder/        # BundleBuilder (ABI encoding, gas pricing)
 │   │   ├── grpc/           # tonic server — DetectOpportunity, StreamOpportunities (broadcast channel + profit filter), GetStatus
-│   │   ├── arbitrum/       # Arbitrum L2 engine: 3-DEX pool discovery (V3/Sushi/Camelot), triangular arb detection, binary search optimal amount, Balancer V2 flash executor
-│   │   ├── ffi/            # C FFI bindings (keccak, RLP, SIMD, queue)
+│   │   ├── arbitrum/       # Arbitrum L2 engine: 3-DEX pool discovery (V3/Sushi/Camelot), triangular arb, Balancer V2 flash executor
+│   │   ├── ffi/
+│   │   │   ├── hot_path.rs     # C FFI bindings (keccak, RLP, SIMD, queue, address ops)
+│   │   │   └── simulator.rs    # C++ AMM FFI bindings (v2_amount_out, find_optimal_frontrun) + pure-Rust fallbacks
 │   │   └── mempool/        # WebSocket data handling
 │   └── benches/            # Criterion benchmarks (7 groups)
 ├── network/                # Go — mempool monitor, pipeline, relay
@@ -670,19 +694,42 @@ mev-engineering-stack/
 │   ├── cmd/testnet-verify/ # Testnet signing verification tool
 │   ├── internal/           # block, gas, mempool, pipeline, relay, rpc, metrics
 │   └── pkg/                # config, types (public packages)
-├── contracts/              # Solidity + Yul — flash arbitrage, multi-DEX routing
+├── contracts/              # Solidity + Yul — flash arbitrage, multi-DEX routing, sandwich
 │   ├── src/
 │   │   ├── FlashArbitrage.sol    # Balancer V2 flash loan (0% fee), 5-field callback hardening, inline Yul ERC20
 │   │   ├── MultiDexRouter.sol    # Direct pool calls (V2/V3/Sushi), packed calldata encoding
+│   │   ├── SandwichExecutorV2.sol # V3 native callback, V2 flash swap, multi-hop A→B→C→D, on-chain profit guard
 │   │   ├── libraries/
 │   │   │   └── YulUtils.sol      # Pure Yul assembly: mulDiv, sqrt, getAmountOut, hash2, calldata parsing (15+ fns)
 │   │   └── interfaces/           # IBalancerVault, IERC20/IWETH, IUniswapV2, IUniswapV3
-│   ├── test/                     # Foundry: 26 tests (access control, callback, fuzz, invariant, YulUtils)
-│   └── script/                   # Deploy: Arbitrum Sepolia + Mainnet
-├── fast/                   # C — SIMD keccak, RLP, lock-free queue, memory pool
-│   ├── src/                # Implementation (6 files)
-│   ├── include/            # Headers
-│   └── test/               # Test suite
+│   ├── test/
+│   │   ├── FlashArbitrage.t.sol    # 14 tests
+│   │   ├── MultiDexRouter.t.sol
+│   │   ├── SandwichExecutorV2.t.sol # 22 tests (access control, callbacks, reentrancy, paths, fuzz)
+│   │   └── YulUtils.t.sol          # 10 tests: 512-bit mulDiv precision + fuzz
+│   └── script/
+│       ├── Deploy.s.sol
+│       ├── DeployArbitrum.s.sol    # Arbitrum Sepolia + Mainnet
+│       └── DeploySandwichV2.s.sol  # SandwichExecutorV2 Arbitrum deploy
+├── fast/                   # C + C++20 — SIMD hot paths + AMM simulation kernel
+│   ├── include/
+│   │   ├── keccak.h
+│   │   ├── rlp.h
+│   │   ├── simd_utils.h
+│   │   ├── lockfree_queue.h
+│   │   ├── memory_pool.h
+│   │   ├── parser.h
+│   │   ├── amm_simulator.h         # C++20 V2/V3 AMM kernel: ternary-search, __uint128_t, C ABI
+│   │   └── pathfinder.h            # C++20 BFS pathfinder: SoA graph, FNV-1a fingerprints, C ABI
+│   └── src/
+│       ├── keccak.c
+│       ├── rlp.c
+│       ├── simd_utils.c
+│       ├── lockfree_queue.c
+│       ├── memory_pool.c
+│       ├── parser.c
+│       ├── amm_simulator.cpp       # C++ translation unit
+│       └── pathfinder.cpp          # C++ translation unit
 ├── proto/                  # gRPC service definition
 ├── dashboard/              # Real-time monitoring (HTML/JS)
 ├── config/                 # Chain + DEX + token configs (JSON)
