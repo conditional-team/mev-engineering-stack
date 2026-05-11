@@ -106,19 +106,19 @@ HTML reports: `target/criterion/report/index.html`
 
 ## Tests
 
-**179 tests** — full coverage across all modules. Run with `cargo test`.
+**163 unit tests** + integration + proptest. Run with `cargo test`.
 
 ```
-test result: ok. 146 passed (unit) + 10 passed (integration) + 23 passed (proptest) = 179 total
+test result: ok. 163 passed (cargo test --lib)
 ```
 
-### Unit Tests (146)
+### Unit Tests (163)
 
 | Module | Tests | What's Verified |
 |--------|-------|-----------------|
 | `detector/arbitrage` | 26 | V2/V3/V3-output calldata parsing, ABI word decoders (`u128`, `u64`, `u32`, `usize`), `decode_addr` (with/without `0x`, empty, invalid hex), `dex_from_fee` dispatch, `match_pool_to_swap` (forward/reversed/no-match), profit calculation (profitable, gas-exceeds, no-arb, single-price), truncated calldata rejection |
 | `detector/backrun` | 3 | Swap selector matching, price impact calculation, small-swap filtering |
-| `detector/liquidation` | 4 | Liquidatable position detection, healthy skip, close factor limits, stale pruning |
+| `detector/liquidation` | 6 | Liquidatable position detection, healthy skip, close factor limits, stale pruning, **collateral/debt unit conversion via `collateral_price_e18` + 256-bit `mul_div_u128`**, **skip when price missing and tokens differ** |
 | `detector/multi_threaded` | 1 | Parallel swap simulation |
 | `simulator` | 19 | Constant-product math (happy path, zero reserves, fee=100%, u128 overflow), pool cache (`load_pools`, `update_pool`, `get_pool`, `pool_reserves` cache hit/fallback/zero-addr), `ordered_pair` canonical ordering, `simulate` (arbitrage, backrun, liquidation), `simulate_bundle`, `success_rate`, `estimate_tx_gas`, simulation count tracking |
 | `simulator/evm` | 9 | `ForkDB` insert/query and storage slots, revm simple ETH transfer, revert string decoding, panic code decoding, calldata encode roundtrip, profit extraction from balance diff, metrics counter increment, `BlockContext` update |

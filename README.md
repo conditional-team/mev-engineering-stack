@@ -17,7 +17,7 @@
 - ⚡ End-to-end pipeline: **~600 ns per opportunity** (sub-microsecond internal processing, excluding network latency)
 - 🧠 Five-language architecture: Go (network I/O), Rust (detection + simulation), C++ (AMM simulation kernel + path optimizer), C (SIMD hot paths), Solidity (on-chain execution)
 - 🔄 Fault-tolerant: graceful degradation across all layers — no panics, no silent failures
-- 📊 250+ tests, 7 benchmark groups, real-time Prometheus dashboard
+- 📊 210+ tests (163 Rust unit + 23 Go + 24 Solidity), 7 benchmark groups, multi-producer C queue stress test (4M items, 9.6 Mops/s), real-time Prometheus dashboard
 - 🔍 Full execution stack: arbitrage, backrun, liquidation detection + AMM simulation kernel with ternary-search optimal sizing
 
 **Focus:** high-performance systems, lock-free concurrency, and cross-language execution depth — not trading strategies.
@@ -46,7 +46,7 @@ The goal is not profitability, but engineering performance, cross-language execu
 | Challenge | Solution |
 |-----------|----------|
 | No public mempool on Arbitrum | Block-based transaction reconstruction with 4-byte selector classification |
-| Sub-microsecond latency under concurrent load | Lock-free MPSC queue (CAS slot-claim), arena allocator, crossbeam channels |
+| Sub-microsecond latency under concurrent load | Lock-free Vyukov MPMC queue (per-slot sequence ticket), arena allocator, crossbeam channels |
 | False sharing in lock-free data structures | `alignas(64)` cache-line isolation on head/tail pointers |
 | Partial system failures cascading | Monitor-only fallback, exponential backoff, pure-Rust FFI fallbacks |
 | Precision-safe 256-bit arithmetic | `checked_mul`/`checked_add`, custom `div_u256_by_u128` with edge-case tests |
@@ -222,10 +222,11 @@ Tail latency dominated by:
 ## Concurrency & Contention Model
 
 **Hot path (zero contention):**
-- MPSC lock-free queue: CAS slot-claim → write → release fence → atomic count increment
-- Single-writer per slot → no write contention, no ABA problem
+- MPMC lock-free queue: Vyukov per-slot sequence ticket (claim → write payload → release-store sequence)
+- Eliminates the classic claim-then-write race a naive CAS-on-tail design exhibits — consumer cannot read a slot whose payload hasn't been published
 - `alignas(64)` head/tail → eliminates false sharing across cache lines
 - Bounded queues (4096) → prevents unbounded latency growth
+- Validated under 4M-item stress test (8 producers / 1 consumer, capacity 1024 forcing backpressure): zero loss, zero duplicates, per-producer FIFO preserved, 9.6 Mops/s on i5-8250U
 
 **Backpressure strategy:**
 - Queue saturated → drop + degrade to monitor-only mode
@@ -329,7 +330,8 @@ High-performance detection, simulation, and bundle construction. See [core/READM
 ```bash
 cd core
 cargo build --release     # opt-level=3, lto=fat, codegen-units=1
-cargo test                # 199 tests (165 unit + 11 integration + 23 proptest)
+cargo test --lib          # 163 unit tests
+cargo test                # full suite incl. integration + proptest
 cargo bench               # 7 Criterion benchmark groups
 ```
 
