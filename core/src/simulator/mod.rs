@@ -854,6 +854,24 @@ mod tests {
     async fn test_simulation_arbitrage() {
         let sim = EvmSimulator::new(test_config());
 
+        // Load two V2 pools with identical reserves so the round-trip
+        // loses to fees (predictable: success=false, gas_used>0).
+        let make_pool = |addr: u8| PoolState {
+            address: [addr; 20],
+            token0: [0x01; 20],
+            token1: [0x02; 20],
+            reserve0: 5_000_000_000_000_000_000_000,
+            reserve1: 10_000_000_000_000,
+            fee: 3000,
+            sqrt_price_x96: 0,
+            liquidity: 0,
+            is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
+        };
+        sim.load_pools(vec![make_pool(0xAA), make_pool(0xBB)]);
+
         let opp = Opportunity {
             opportunity_type: OpportunityType::Arbitrage,
             token_in: "WETH".to_string(),
@@ -1213,6 +1231,23 @@ mod tests {
     #[tokio::test]
     async fn test_simulate_backrun() {
         let sim = EvmSimulator::new(test_config());
+        // Backrun also needs an exit pool (the second hop). Load both.
+        let make_pool = |addr: u8| PoolState {
+            address: [addr; 20],
+            token0: [0x01; 20],
+            token1: [0x02; 20],
+            reserve0: 5_000_000_000_000_000_000_000,
+            reserve1: 10_000_000_000_000,
+            fee: 500,
+            sqrt_price_x96: 0,
+            liquidity: 0,
+            is_v3: false,
+            current_tick: 0,
+            tick_spacing: 0,
+            ticks: vec![],
+        };
+        sim.load_pools(vec![make_pool(0xAA), make_pool(0xBB)]);
+
         let opp = Opportunity {
             opportunity_type: OpportunityType::Backrun,
             token_in: "WETH".to_string(),
@@ -1222,8 +1257,8 @@ mod tests {
             gas_estimate: 180_000,
             deadline: 0,
             path: vec![crate::types::DexType::UniswapV3],
-            pool_addresses: vec![[0xAA; 20]],
-            pool_fees: vec![500],
+            pool_addresses: vec![[0xAA; 20], [0xBB; 20]],
+            pool_fees: vec![500, 500],
             target_tx: None,
         };
         let result = sim.simulate(&opp).await;

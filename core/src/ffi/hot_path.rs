@@ -345,7 +345,12 @@ pub mod safe {
     pub fn rlp_encode_u256(value: U256) -> Vec<u8> {
         let mut bytes = [0u8; 32];
         value.to_big_endian(&mut bytes);
-        let start = bytes.iter().position(|&b| b != 0).unwrap_or(31);
+        // Per Ethereum yellow-paper RLP: integer 0 encodes as the empty
+        // string 0x80, NOT as 0x00. Match the C impl (`mev_rlp_encode_uint256`).
+        let start = bytes.iter().position(|&b| b != 0).unwrap_or(32);
+        if start == 32 {
+            return vec![0x80];
+        }
         let significant = &bytes[start..];
         if significant.len() == 1 && significant[0] < 0x80 {
             significant.to_vec()
@@ -554,10 +559,9 @@ mod tests {
     #[test]
     fn test_rlp_encode_u256_zero() {
         let encoded = safe::rlp_encode_u256(U256::zero());
-        // Zero encodes as a single byte 0x00 (short string)
-        assert!(!encoded.is_empty());
-        // RLP for 0 is [0x00] — single byte below 0x80
-        assert_eq!(encoded, vec![0x00]);
+        // Per Ethereum yellow-paper: RLP(integer 0) = empty string = [0x80].
+        // (The byte 0x00 is reserved for an explicit single-byte string.)
+        assert_eq!(encoded, vec![0x80]);
     }
 
     #[test]

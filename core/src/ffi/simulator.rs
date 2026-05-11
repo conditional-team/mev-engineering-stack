@@ -229,26 +229,34 @@ mod tests {
 
     #[test]
     fn v2_amount_out_basic() {
-        // 1 ETH in, 1000 ETH / 1_000_000 USDC pool, 0.3% fee
-        let r0: u64 = 1_000 * 10u64.pow(18);
-        let r1: u64 = 1_000_000 * 10u64.pow(6);
-        let out = v2_amount_out(r0, r1, 3000, 10u64.pow(18));
-        assert!(out.is_some());
-        // ~997 USDC out of 1_000_000 pool for 1 ETH in 1000 ETH pool
+        // u64-fitting reserves: 10 ETH (1e19) / 20_000 USDC (2e10),
+        // amount_in = 0.01 ETH (1e16). Fee = 0.30% (3000 bps in this API
+        // — the impl divides by 100 internally to get bps_native=30).
+        let r0: u64 = 10 * 10u64.pow(18);          // 1e19, fits u64 (< 1.8e19)
+        let r1: u64 = 20_000 * 10u64.pow(6);       // 2e10
+        let amount_in: u64 = 10u64.pow(16);        // 0.01 ETH
+        let out = v2_amount_out(r0, r1, 3000, amount_in);
+        assert!(out.is_some(), "swap should succeed");
         let out_u = out.unwrap();
-        assert!(out_u > 900 * 10u64.pow(6), "got {}", out_u);
-        assert!(out_u < 1_100 * 10u64.pow(6), "got {}", out_u);
+        // Expected: ~19.94 USDC = ~1.994e7 base units (slightly less than 20 due to fee+impact)
+        assert!(out_u > 19_500_000 && out_u < 20_000_000, "got {}", out_u);
     }
 
     #[test]
     fn v2_amount_out_mainnet_scale() {
-        // At mainnet reserve scale (1e20), intermediates overflow u64/u128
-        // The C++ impl uses __uint128_t so this should not return 0
-        let r0: u64 = 100_000 * 10u64.pow(18);  // 1e23 — large pool
-        let r1: u64 = u64::MAX / 2;              // saturate
-        let out = v2_amount_out(r0, r1, 3000, 10u64.pow(18));
-        // Should not panic and should return a reasonable value or None
-        let _ = out;
+        // Stress-test that intermediates (amount_in * reserve_out * fee_factor)
+        // don't overflow when both operands are near the top of u64.
+        // The C impl uses __uint128_t for the intermediate; the Rust fallback uses u128.
+        let r0: u64 = u64::MAX / 4;
+        let r1: u64 = u64::MAX / 2;
+        let amount_in: u64 = u64::MAX / 8;
+        let out = v2_amount_out(r0, r1, 3000, amount_in);
+        // Must not panic. Result may be Some(_) or None (if it would overflow u64),
+        // but must be deterministic and bounded.
+        if let Some(o) = out {
+            assert!(o > 0, "if Some, output must be positive");
+            assert!(o < u64::MAX, "output must fit u64");
+        }
     }
 
     #[test]
