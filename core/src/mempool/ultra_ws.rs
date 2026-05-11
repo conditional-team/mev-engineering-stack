@@ -93,16 +93,25 @@ impl MempoolMonitor {
     ) -> anyhow::Result<()> {
         self.running.store(true, Ordering::SeqCst);
         
-        // Pin to CPU core if specified
-        if let Some(_core) = self.config.cpu_core {
+        // Pin to CPU core if specified (Linux only — Windows/macOS lack a portable API).
+        if let Some(core) = self.config.cpu_core {
             #[cfg(target_os = "linux")]
             {
-                use core_affinity::CoreId;
                 let core_ids = core_affinity::get_core_ids().unwrap_or_default();
                 if let Some(core_id) = core_ids.get(core) {
                     core_affinity::set_for_current(*core_id);
                     info!("Pinned mempool monitor to CPU core {}", core);
+                } else {
+                    warn!(
+                        requested = core,
+                        available = core_ids.len(),
+                        "Requested CPU core not available, skipping affinity pinning"
+                    );
                 }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = core; // affinity pinning not supported on this platform
             }
         }
         
